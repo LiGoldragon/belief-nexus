@@ -7,6 +7,8 @@ use protos::ReaderBudget;
 use shared_translator::{ByteViewable, Restorable, Signal};
 use signal_belief_nexus as public;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TextLimits { pub nodes: usize, pub depth: usize }
@@ -116,6 +118,7 @@ pub struct TranslatorConfiguration {
     frame_capacity: Option<meta::ByteLimit>,
     transport_timeout: Option<meta::Timeout>,
     allowed_nexus_peers: Option<public::PeerList>,
+    git_executable: Option<public::ExecutablePath>,
 }
 
 impl TranslatorConfiguration {
@@ -147,6 +150,7 @@ impl TranslatorConfiguration {
             meta::Set::TranslatorFrameCapacity(value) if value.0 > 0 => self.frame_capacity = Some(value),
             meta::Set::TranslatorTransportTimeout(value) if value.0 > 0 => self.transport_timeout = Some(value),
             meta::Set::AllowedNexusPeers(value) if !value.0.is_empty() => self.allowed_nexus_peers = Some(value),
+            meta::Set::GitExecutable(value) if !value.0.is_empty() => self.git_executable = Some(value),
             _ => return Err(TranslatorError::Configuration("invalid translator-owned setting".into())),
         }
         Ok(())
@@ -156,7 +160,112 @@ impl TranslatorConfiguration {
         self.nexus_socket.is_some() && self.meta_nexus_socket.is_some() && self.call_timeout.is_some()
             && self.output_limit.is_some() && self.text_budget.is_some() && self.frame_capacity.is_some()
             && self.transport_timeout.is_some() && self.allowed_nexus_peers.is_some()
+            && self.git_executable.is_some()
     }
+
+    pub fn ordinary_nexus_socket(&self) -> Option<&str> { self.nexus_socket.as_ref().map(|value| value.0.as_str()) }
+    pub fn meta_nexus_socket(&self) -> Option<&str> { self.meta_nexus_socket.as_ref().map(|value| value.0.as_str()) }
+    pub fn text_limits(&self) -> Option<TextLimits> {
+        self.text_budget.as_ref().and_then(|value| Some(TextLimits {
+            nodes: usize::try_from(value.node_limit.0).ok()?,
+            depth: usize::try_from(value.depth_limit.0).ok()?,
+        }))
+    }
+    pub fn frame_capacity(&self) -> Option<signal::FrameCapacity> {
+        self.frame_capacity.as_ref().and_then(|value| usize::try_from(value.0).ok()).map(signal::FrameCapacity::from)
+    }
+    pub fn transport_timeout(&self) -> Option<Duration> {
+        self.transport_timeout.as_ref().and_then(|value| u64::try_from(value.0).ok()).map(Duration::from_millis)
+    }
+    pub fn allowed_nexus_peers(&self) -> Option<&public::PeerList> { self.allowed_nexus_peers.as_ref() }
+    pub fn git_executable(&self) -> Option<&str> { self.git_executable.as_ref().map(|value| value.0.as_str()) }
+}
+
+/// A one-attempt client for the shared four-byte, big-endian Signal frame.
+/// Text clients carry only the datom; caller identity is added by the
+/// translator after observing this connection.
+pub fn text_request(socket: &Path, text: &str, capacity: signal::FrameCapacity) -> Result<String, TranslatorError> {
+    use signal::{FrameReading, FrameWriting};
+    let mut stream = UnixStream::connect(socket).map_err(TranslatorError::Io)?;
+    stream.write_frame(&signal::FrameBody::from(text.as_bytes().to_vec()), capacity).map_err(signal_error)?;
+    let body = stream.read_frame(capacity).map_err(signal_error)?;
+    String::from_utf8(Vec::<u8>::from(body)).map_err(|error| TranslatorError::Text(error.to_string()))
+}
+
+pub fn forward_signal(socket: &Path, request: Vec<u8>, capacity: signal::FrameCapacity, timeout: Duration) -> Result<Vec<u8>, TranslatorError> {
+    use signal::{FrameReading, FrameWriting};
+    let mut stream = UnixStream::connect(socket).map_err(TranslatorError::Io)?;
+    stream.set_read_timeout(Some(timeout)).map_err(TranslatorError::Io)?;
+    stream.set_write_timeout(Some(timeout)).map_err(TranslatorError::Io)?;
+    stream.write_frame(&signal::FrameBody::from(request), capacity).map_err(signal_error)?;
+    stream.read_frame(capacity).map(Vec::<u8>::from).map_err(signal_error)
+}
+
+fn signal_error(error: signal::FrameError) -> TranslatorError { TranslatorError::Signal(error.to_string()) }
+
+/// Serve one ordinary text request. The supplied digest is the compatibility
+/// digest of this translator's public contract, never caller authority.
+pub fn serve_public_text(
+    stream: &mut UnixStream,
+    configuration: &TranslatorConfiguration,
+    contract_digest: public::ContractDigest,
+) -> Result<(), TranslatorError> {
+    use signal::{FrameReading, FrameWriting};
+    let capacity = configuration.frame_capacity().ok_or_else(|| TranslatorError::Configuration("translator is awaiting frame capacity".into()))?;
+    let limits = configuration.text_limits().ok_or_else(|| TranslatorError::Configuration("translator is awaiting text budget".into()))?;
+    let timeout = configuration.transport_timeout().ok_or_else(|| TranslatorError::Configuration("translator is awaiting transport timeout".into()))?;
+    let target = configuration.ordinary_nexus_socket().ok_or_else(|| TranslatorError::Configuration("translator is awaiting ordinary Nexus socket".into()))?;
+    let body = stream.read_frame(capacity).map_err(signal_error)?;
+    let text = String::from_utf8(Vec::<u8>::from(body)).map_err(|error| TranslatorError::Text(error.to_string()))?;
+    let query = decode_public(&text, limits)?;
+    let caller = observe_peer(stream, contract_digest)?;
+    let request = archive(&public::Call { caller, query })?;
+    let answer = forward_signal(Path::new(target), request, capacity, timeout)?;
+    let response = restore_public_response(answer)?;
+    stream.write_frame(&signal::FrameBody::from(encode_public(&response).into_bytes()), capacity).map_err(signal_error)
+}
+
+/// Serve one meta text request and apply an acknowledged translator-owned
+/// configuration change as one coherent revision.
+pub fn serve_meta_text(
+    stream: &mut UnixStream,
+    configuration: &mut TranslatorConfiguration,
+    contract_digest: public::ContractDigest,
+) -> Result<(), TranslatorError> {
+    use signal::{FrameReading, FrameWriting};
+    let capacity = configuration.frame_capacity().unwrap_or_default();
+    let limits = configuration.text_limits().unwrap_or(TextLimits { nodes: signal::MAXIMUM_SIGNAL_BYTES, depth: signal::MAXIMUM_SIGNAL_DEPTH });
+    let timeout = configuration.transport_timeout().unwrap_or(Duration::from_secs(5));
+    let target = configuration.meta_nexus_socket().ok_or_else(|| TranslatorError::Configuration("translator is awaiting meta Nexus socket".into()))?.to_owned();
+    let body = stream.read_frame(capacity).map_err(signal_error)?;
+    let text = String::from_utf8(Vec::<u8>::from(body)).map_err(|error| TranslatorError::Text(error.to_string()))?;
+    let query = decode_meta(&text, limits)?;
+    let caller = observe_peer(stream, contract_digest)?;
+    let answer = forward_signal(Path::new(&target), archive(&meta::MetaCall { caller, query })?, capacity, timeout)?;
+    let response = restore_meta_response(answer)?;
+    if let meta::Response::Configured(state) = &response { configuration.apply(state)?; }
+    stream.write_frame(&signal::FrameBody::from(encode_meta(&response).into_bytes()), capacity).map_err(signal_error)
+}
+
+/// Serve one binary emission request from the configured live Nexus peer.
+pub fn serve_emission(
+    stream: &mut UnixStream,
+    configuration: &TranslatorConfiguration,
+    expected_process: &meta::PairedProcess,
+    contract_digest: public::ContractDigest,
+    executor: &FileEmission,
+) -> Result<(), TranslatorError> {
+    use signal::{FrameReading, FrameWriting};
+    let capacity = configuration.frame_capacity().ok_or_else(|| TranslatorError::Configuration("translator is awaiting frame capacity".into()))?;
+    let caller = observe_peer(stream, contract_digest)?;
+    if caller.user_id != expected_process.user_id || caller.group_id != expected_process.group_id || caller.process_id != expected_process.process_id {
+        return Err(TranslatorError::Peer("caller is not the paired Nexus process".into()));
+    }
+    let peers = configuration.allowed_nexus_peers().ok_or_else(|| TranslatorError::Configuration("translator is awaiting allowed Nexus peers".into()))?;
+    admit_peer(caller, peers)?;
+    let request = Vec::<u8>::from(stream.read_frame(capacity).map_err(signal_error)?);
+    let answer = execute_emission(request, executor)?;
+    stream.write_frame(&signal::FrameBody::from(answer), capacity).map_err(signal_error)
 }
 
 pub fn owner(setting: &meta::Set) -> meta::Owner {
@@ -164,6 +273,7 @@ pub fn owner(setting: &meta::Set) -> meta::Owner {
         meta::Set::NexusSocket(_) | meta::Set::MetaNexusSocket(_) | meta::Set::CallTimeout(_)
         | meta::Set::OutputLimit(_) | meta::Set::TextBudget(_) | meta::Set::TranslatorFrameCapacity(_)
         | meta::Set::TranslatorTransportTimeout(_) | meta::Set::AllowedNexusPeers(_) => meta::Owner::Translator,
+        meta::Set::GitExecutable(_) => meta::Owner::Translator,
         _ => meta::Owner::Nexus,
     }
 }
@@ -226,7 +336,7 @@ mod tests {
 
     #[test]
     fn emission_lane_is_binary_signal_only() {
-        let executor = FileEmission::new(PathBuf::from("git"), 2).unwrap();
+        let executor = FileEmission::new(PathBuf::from("git")).unwrap();
         let query = emission_belief_nexus::Query::Snapshot(public::Repository(public::RepositoryPath("/definitely/missing".into())));
         let answer = execute_emission(archive(&query).unwrap(), &executor).unwrap();
         let response = Signal::<emission_belief_nexus::Response>::from(answer).restore().unwrap();
