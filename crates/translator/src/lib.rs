@@ -1,5 +1,7 @@
 //! Text and external-effect boundaries for Belief Nexus.
 
+pub mod server;
+
 use datom_codec::{Actualizing, Budget, Potential};
 use emission_belief_nexus::FileEmission;
 use meta_signal_belief_nexus as meta;
@@ -122,6 +124,20 @@ pub struct TranslatorConfiguration {
 }
 
 impl TranslatorConfiguration {
+    pub fn from_bootstrap(bootstrap: &meta::TranslatorBootstrap) -> Result<Self, TranslatorError> {
+        let frame_capacity = usize::try_from(bootstrap.admission.byte_limit.0).ok()
+            .filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_BYTES)
+            .ok_or_else(|| TranslatorError::Configuration("invalid bootstrap frame capacity".into()))?;
+        let timeout = bootstrap.admission.timeout.0;
+        if timeout <= 0 { return Err(TranslatorError::Configuration("invalid bootstrap timeout".into())); }
+        Ok(Self {
+            nexus_socket: Some((bootstrap.ordinary_nexus_socket.0).clone()),
+            meta_nexus_socket: Some((bootstrap.meta_nexus_socket_path.0).clone()),
+            frame_capacity: Some(meta::ByteLimit(i64::try_from(frame_capacity).expect("Signal capacity fits i64"))),
+            transport_timeout: Some(meta::Timeout(timeout)),
+            ..Self::default()
+        })
+    }
     pub fn revision(&self) -> Option<&meta::ConfigurationRevision> { self.revision.as_ref() }
 
     /// Apply only the authoritative Configured result. A skipped or repeated
