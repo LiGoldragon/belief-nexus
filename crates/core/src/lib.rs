@@ -794,7 +794,14 @@ fn deduplicate_preserving_order(names: Vec<wire::ModuleName>) -> Vec<wire::Modul
 }
 
 fn module_key(name: &wire::ModuleName) -> String {
-    format!("{}:{}", kind_name(&name.kind), name.subject.0)
+    let rank = match name.kind {
+        wire::Kind::Spirit => 0,
+        wire::Kind::Intent => 1,
+        wire::Kind::Vision => 2,
+        wire::Kind::Knowledge => 3,
+        wire::Kind::Role => 4,
+    };
+    format!("{rank}:{}", name.subject.0)
 }
 
 fn repository_key(repository: &wire::Repository) -> String {
@@ -945,7 +952,7 @@ mod tests {
         let plan = core
             .prepare_furnish(request("/w", vec![vision.clone(), spirit, intent]))
             .unwrap();
-        assert_eq!(plan.image.model_instructions, b"intent\nspirit\n");
+        assert_eq!(plan.image.model_instructions, b"spirit\nintent\n");
         assert_eq!(
             plan.image.skills,
             vec![SkillAsset {
