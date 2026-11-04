@@ -44,20 +44,22 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
                 return Err(());
             }
         }
-        let defaults = workspace.placement_defaults.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect();
-        let plan = core
-            .prepare_furnish_with_defaults(workspace.request.clone(), &defaults)
-            .map_err(|_| ())?;
-        let context = || PublicationContext {
-            owner: workspace.owner.clone(),
-            configuration_revision: workspace.configuration_revision.clone(),
-            layout: workspace.layout.clone(),
-            retention_policy: workspace.retention.clone(),
-        };
         if let Some(pending) = &workspace.pending {
-            if &core.begin_publication(&plan, context()).map_err(|_| ())? != pending {
+            let defaults = workspace.placement_defaults.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect();
+            let plan = core
+                .prepare_furnish_with_defaults(workspace.request.clone(), &defaults)
+                .map_err(|_| ())?;
+            let context = PublicationContext {
+                owner: workspace.owner.clone(),
+                configuration_revision: workspace.configuration_revision.clone(),
+                layout: workspace.layout.clone(),
+                retention_policy: workspace.retention.clone(),
+            };
+            if &core.begin_publication(&plan, context).map_err(|_| ())? != pending {
                 return Err(());
             }
+        } else if workspace.successful.is_none() {
+            return Err(());
         }
     }
     Ok(core)
@@ -249,6 +251,7 @@ fn watch_unavailable(
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct FakeEffects {
@@ -288,6 +291,8 @@ mod tests {
         image: Option<MemoryImage>,
         stores: usize,
         fail_at: Option<usize>,
+        commit_then_panic_at: Option<usize>,
+        committed: Option<Arc<Mutex<Option<MemoryImage>>>>,
     }
 
     impl MemoryStore for FakeMemory {
@@ -300,7 +305,14 @@ mod tests {
             if self.fail_at == Some(self.stores) {
                 return Err(MemoryError::Unavailable);
             }
+            let image = image.clone();
             self.image = Some(image.clone());
+            if let Some(committed) = &self.committed {
+                *committed.lock().unwrap() = Some(image);
+            }
+            if self.commit_then_panic_at == Some(self.stores) {
+                panic!("simulated process loss after durable commit");
+            }
             Ok(())
         }
     }
@@ -445,6 +457,19 @@ mod tests {
                     subject: wire::Subject("unrelated".into()),
                 },
                 relative_path: wire::RelativePath("knowledge/unrelated.md".into()),
+                placement_option: None,
+                content: emission::Content(content.into()),
+            }],
+        }
+    }
+
+    fn conflicting_snapshot(revision: &str, content: &str) -> emission::SourceSnapshot {
+        emission::SourceSnapshot {
+            repository: other_repository(),
+            source_revision: wire::SourceRevision(revision.into()),
+            module_source_vector: vec![emission::ModuleSource {
+                module_name: module(),
+                relative_path: wire::RelativePath("vision/nexus.md".into()),
                 placement_option: None,
                 content: emission::Content(content.into()),
             }],
@@ -654,6 +679,235 @@ mod tests {
         let second = Daemon::start(bootstrap(), effects, memory).unwrap();
         assert!(second.memory.workspaces[0].pending.is_none());
         assert!(second.memory.workspaces[0].successful.is_some());
+        assert!(second.effects.calls.iter().all(|query| {
+            !matches!(query, emission::Query::Publish(_))
+        }));
+    }
+
+    #[test]
+    fn startup_reconciles_the_source_commit_crash_window() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let memory = FakeMemory { image: Some(ready_memory()), ..Default::default() };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Furnished(_)
+        ));
+        let old = daemon.memory.workspaces[0].successful.clone().unwrap();
+        let committed = Arc::new(Mutex::new(None));
+        daemon.store.committed = Some(committed.clone());
+        daemon.store.commit_then_panic_at = Some(daemon.store.stores + 1);
+        daemon.effects.replies.push_back(emission::Response::Snapshotted(snapshot("two", "two")));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| daemon.poll_once()));
+        assert!(panic.is_err(), "fixture must stop after the newer source snapshot is durable");
+
+        let durable = committed.lock().unwrap().clone().unwrap();
+        assert_eq!(durable.repositories[0].snapshot.source_revision, wire::SourceRevision("two".into()));
+        assert_eq!(durable.workspaces[0].successful, Some(old.clone()));
+        assert!(durable.workspaces[0].pending.is_none());
+
+        let effects = FakeEffects { publish_from_query: true, ..Default::default() };
+        let restarted = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(durable), ..Default::default() },
+        )
+        .unwrap();
+        let recovered = restarted.memory.workspaces[0].successful.as_ref().unwrap();
+        assert_ne!(recovered.generation_id, old.generation_id);
+        assert_eq!(recovered.publication_revision, wire::PublicationRevision(2));
+        assert!(restarted.memory.workspaces[0].pending.is_none());
+        assert_eq!(
+            restarted.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn startup_reconciles_each_affected_workspace_once() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        for name in ["first", "second"] {
+            assert!(matches!(
+                daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named(name)) }),
+                wire::Response::Furnished(_)
+            ));
+        }
+        let mut durable = daemon.memory.clone();
+        durable.repositories[0].snapshot = snapshot("two", "two");
+
+        let restarted = Daemon::start(
+            bootstrap(),
+            FakeEffects { publish_from_query: true, ..Default::default() },
+            FakeMemory { image: Some(durable), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(
+            restarted.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
+            2
+        );
+        assert!(restarted.memory.workspaces.iter().all(|workspace| {
+            workspace.pending.is_none()
+                && workspace.successful.as_ref().is_some_and(|value| value.publication_revision == wire::PublicationRevision(2))
+        }));
+    }
+
+    #[test]
+    fn ambiguous_settled_workspace_starts_and_preserves_its_success() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Furnished(_)
+        ));
+        let prior = daemon.memory.workspaces[0].successful.clone().unwrap();
+        let mut durable = daemon.memory.clone();
+        durable.repositories.push(StoredRepository {
+            owner: wire::Owner::Login(caller().user_id),
+            snapshot: conflicting_snapshot("other", "ambiguous"),
+        });
+
+        let restarted = Daemon::start(
+            bootstrap(),
+            FakeEffects::default(),
+            FakeMemory { image: Some(durable), ..Default::default() },
+        )
+        .expect("settled success with newly ambiguous sources is retry refusal, not corrupt Memory");
+        assert_eq!(restarted.memory.workspaces[0].successful, Some(prior));
+        assert!(restarted.memory.workspaces[0].pending.is_none());
+        assert!(restarted.events.iter().any(|event| matches!(
+            event.response,
+            wire::Response::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Source, .. })
+        )));
+        assert!(restarted.effects.calls.iter().all(|query| !matches!(query, emission::Query::Publish(_))));
+    }
+
+    #[test]
+    fn startup_retry_memory_failure_is_typed_and_the_next_restart_retries() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Furnished(_)
+        ));
+        let prior = daemon.memory.workspaces[0].successful.clone().unwrap();
+        let mut durable = daemon.memory.clone();
+        durable.repositories[0].snapshot = snapshot("two", "two");
+
+        let failed = Daemon::start(
+            bootstrap(),
+            FakeEffects { publish_from_query: true, ..Default::default() },
+            FakeMemory { image: Some(durable), fail_at: Some(1), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(failed.memory.workspaces[0].successful, Some(prior));
+        assert!(failed.memory.workspaces[0].pending.is_none());
+        assert!(failed.events.iter().any(|event| matches!(
+            event.response,
+            wire::Response::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Memory, .. })
+        )));
+        assert!(failed.effects.calls.iter().all(|query| !matches!(query, emission::Query::Publish(_))));
+
+        let durable = failed.store.image.clone().unwrap();
+        let recovered = Daemon::start(
+            bootstrap(),
+            FakeEffects { publish_from_query: true, ..Default::default() },
+            FakeMemory { image: Some(durable), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(
+            recovered.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
+            1
+        );
+        assert!(recovered.memory.workspaces[0].pending.is_none());
+        assert_eq!(
+            recovered.memory.workspaces[0].successful.as_ref().unwrap().publication_revision,
+            wire::PublicationRevision(2)
+        );
+    }
+
+    #[test]
+    fn current_successful_basis_is_quiet_on_startup() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Furnished(_)
+        ));
+
+        let restarted = Daemon::start(
+            bootstrap(),
+            FakeEffects::default(),
+            FakeMemory { image: Some(daemon.memory), ..Default::default() },
+        )
+        .unwrap();
+        assert!(restarted.effects.calls.is_empty());
+        assert!(restarted.memory.workspaces[0].pending.is_none());
     }
 
     #[test]
@@ -1381,7 +1635,34 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             next_subscriber: 1,
         };
         daemon.recover_pending();
+        daemon.reconcile_startup();
         Ok(daemon)
+    }
+
+    fn reconcile_startup(&mut self) {
+        let workspaces = self.core.retry_workspaces();
+        for workspace in workspaces {
+            let Some(stored) = self.workspace(&workspace).cloned() else {
+                continue;
+            };
+            if stored.pending.is_some() {
+                continue;
+            }
+            let owner = stored.owner.clone();
+            if let wire::Response::Refused(refusal) = self.furnish(
+                owner.clone(),
+                translator::Caller {
+                    user_id: translator::UserId(0),
+                    process_id: translator::ProcessId(0),
+                },
+                stored.request,
+            ) {
+                self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                    workspace,
+                    refusal_kind: refusal_kind(&refusal),
+                }));
+            }
+        }
     }
 
     fn emit_effect(&mut self, query: emission::Query) -> emission::Response {
