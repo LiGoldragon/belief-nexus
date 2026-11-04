@@ -85,7 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (revision, set) in sets.into_iter().enumerate() {
         let query = meta::Query::Configure(meta::ConfigureRequest { configuration_revision_option: Some(meta::ConfigurationRevision(revision as i64)), set });
         let text = belief_nexus_translator::text_request(&meta_translator, &belief_nexus_translator::encode_meta_query(&query), capacity)?;
-        let response = belief_nexus_translator::decode_meta_response_text(&text)?;
+        let response = belief_nexus_translator::decode_meta_response_text(&text)
+            .map_err(|error| format!("deployment response was not meta signal: {text}: {error}"))?;
         match response {
             meta::Response::Configured(_) => {}
             meta::Response::ConfigureRefused(meta::ConfigurationRefusal::StaleRevision(_)) if revision == 0 => break,

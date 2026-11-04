@@ -244,8 +244,9 @@ impl TranslatorConfiguration {
             meta::Set::MetaNexusSocket(value) => self.meta_nexus_socket = Some(value),
             meta::Set::CallTimeout(value) if value.0 > 0 => self.call_timeout = Some(value),
             meta::Set::OutputLimit(value) if value.0 > 0 => self.output_limit = Some(value),
-            meta::Set::TextBudget(value) if value.node_limit.0 > 0 && value.depth_limit.0 > 0 => self.text_budget = Some(value),
-            meta::Set::TranslatorFrameCapacity(value) if value.0 > 0 => self.frame_capacity = Some(value),
+            meta::Set::TextBudget(value) if usize::try_from(value.node_limit.0).ok().is_some_and(|nodes| nodes > 0 && nodes <= signal::MAXIMUM_SIGNAL_BYTES)
+                && usize::try_from(value.depth_limit.0).ok().is_some_and(|depth| depth > 0 && depth <= signal::MAXIMUM_SIGNAL_DEPTH) => self.text_budget = Some(value),
+            meta::Set::TranslatorFrameCapacity(value) if usize::try_from(value.0).ok().is_some_and(|capacity| capacity > 0 && capacity <= signal::MAXIMUM_SIGNAL_BYTES) => self.frame_capacity = Some(value),
             meta::Set::TranslatorTransportTimeout(value) if value.0 > 0 => self.transport_timeout = Some(value),
             meta::Set::AllowedNexusPeers(value) if !value.0.is_empty() => self.allowed_nexus_peers = Some(value),
             meta::Set::GitExecutable(value) if !value.0.is_empty() => self.git_executable = Some(value),
