@@ -476,7 +476,7 @@ mod tests {
                 meta::Set::MetaNexusSocket(meta::SocketPath("meta".into())),
                 meta::Set::CallTimeout(meta::Timeout(100)),
                 meta::Set::OutputLimit(meta::ByteLimit(1000)),
-                meta::Set::TextBudget(meta::Budget { node_limit: meta::NodeLimit(1000), depth_limit: meta::DepthLimit(100) }),
+                meta::Set::TextBudget(meta::Budget { node_limit: meta::NodeLimit(1000), depth_limit: meta::DepthLimit(64) }),
                 meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1000)),
                 meta::Set::TranslatorTransportTimeout(meta::Timeout(100)),
                 meta::Set::AllowedNexusPeers(public::PeerList(vec![peer])),

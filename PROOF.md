@@ -1,34 +1,51 @@
 # Belief Nexus version 1 proof
 
-Run from the repository root:
+Run from the repository root with existing Codex and Claude login credentials:
 
 ```sh
 nix flake check -L
 ./proof/run.sh
 ```
 
-`proof/run.sh` builds `.#nexus`, `.#translator`, `.#cli`, and `.#meta-cli` and
-runs their actual executables. The process proof observes:
+The script builds the default package and the Nix test check, starts
+`belief-pair` from a typed Place, and calls the public meta and ordinary CLIs
+from separate processes. Its fixture has:
 
-- typed bootstrap and empty-Memory, one-field-at-a-time configuration reaching
-  readiness through the meta CLI;
-- authenticated ordinary Register, Resolve, Furnish, and Subscribe calls
-  through the ordinary CLI;
-- explicit found and missing module results;
-- an initial subscription state, a quiet open connection, and pushed Changed
-  events;
-- immutable committed-main snapshots, atomic refurnishing, and removal and
-  restoration of a selected module;
-- a real installed Codex start, `codex --no-daemon exec -C <workspace>`, whose
-  last message contains the exact system-prompt token `BUNDLE_WITNESS_1` and
-  the exact invoked-skill token `SKILL_WITNESS_1`;
-- process restart from the same durable Memory, after which the translator
-  restores its authoritative configuration and an ordinary Resolve succeeds
-  without reconfiguration.
+- Spirit without placement frontmatter, exercising the stored SystemPrompt
+  default;
+- Knowledge without placement frontmatter, exercising the stored Skills
+  default;
+- Vision with `placement: system-prompt`, exercising an explicit override of
+  its stored Skills default.
 
-The ordinary unit and process tests separately derive caller identity from
-`SO_PEERCRED` and the live `/proc/<pid>/exe`, reject self-asserted callers, and
-treat the contract digest as compatibility rather than authority. Filesystem
-tests cover pre-pointer failure, owned-pointer and manifest inspection,
-foreign current paths, settings conflicts and malformed settings, unrelated
-settings preservation, and exact cleanup targets.
+It registers the committed-main repository and furnishes separate Codex and
+Claude workspaces. Each `Furnished` reply carries stable SystemPromptPath and
+SkillsPath, all three found names, and an empty missing vector. It then starts:
+
+```sh
+codex exec -C <codex-workspace> '<witness request>'
+(cd <claude-workspace> && claude --print --dangerously-skip-permissions '<witness request>')
+```
+
+Both real harnesses must return all exact witnesses:
+`BUNDLE_DEFAULT_TOKEN`, `BUNDLE_OVERRIDE_TOKEN`, and `SKILL_DEFAULT_TOKEN`.
+No credential is copied or replaced.
+
+The Nix check contains the independent typed and process evidence: configured
+direct-peer success and unconfigured refusal from kernel Caller facts; PeerId
+owner isolation; Login ownership across CLI PIDs; strict placement parsing;
+found/missing resolution; subscription initial state and capacity; quiet watch;
+automatic removed/restored refurnish; ambiguity preserving the current
+publication; pending/recovery durability; atomic pointer publication; settings
+preservation and conflict refusal; exact cleanup; and committed-main snapshots
+that ignore worktree changes.
+
+Observed packaged first-launch witness at belief commit `9a6ead4`:
+
+```text
+belief-nexus-meta proof 'Configure.{ None RepositoryPolling.200 }'
+Configured.{ RepositoryPolling.200 Nexus 24 Ready }
+
+belief-nexus proof 'Resolve.[]'
+Resolved.{ [] [] }
+```
