@@ -379,6 +379,7 @@ mod tests {
         };
         let stop = Arc::new(AtomicBool::new(false));
         let running = Arc::clone(&stop);
+        let restart_bootstrap = bootstrap.clone();
         let server = thread::spawn(move || run_until(bootstrap, running).unwrap());
         for _ in 0..100 {
             if privileged.exists() {
@@ -417,6 +418,26 @@ mod tests {
                 },
             );
             assert!(matches!(response, meta::Response::Configured(_)));
+        }
+        let response: wire::Response = exchange(
+            &ordinary,
+            &wire::Call {
+                caller: caller.clone(),
+                query: wire::Query::Resolve(Vec::new()),
+            },
+        );
+        assert!(matches!(response, wire::Response::Resolved(_)));
+        stop.store(true, Ordering::Release);
+        server.join().unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::clone(&stop);
+        let server = thread::spawn(move || run_until(restart_bootstrap, running).unwrap());
+        for _ in 0..100 {
+            if ordinary.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
         }
         let response: wire::Response = exchange(
             &ordinary,
