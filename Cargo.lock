@@ -21,6 +21,15 @@ dependencies = [
 [[package]]
 name = "belief-nexus-daemon"
 version = "0.1.0"
+dependencies = [
+ "belief-nexus-core",
+ "emission-belief-nexus",
+ "meta-signal-belief-nexus",
+ "rkyv",
+ "signal",
+ "signal-belief-nexus",
+ "tempfile",
+]
 
 [[package]]
 name = "belief-nexus-translator"
@@ -34,6 +43,7 @@ dependencies = [
  "rkyv",
  "signal",
  "signal-belief-nexus",
+ "tempfile",
  "translator",
 ]
 
@@ -319,7 +329,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-belief-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=cd2788c4855ce57ca3ba20004ac2178e558ee3d4#cd2788c4855ce57ca3ba20004ac2178e558ee3d4"
+source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=d28c8e0d98109bc1ad04cc0b8e2cb39a37f447bf#d28c8e0d98109bc1ad04cc0b8e2cb39a37f447bf"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",
@@ -526,7 +536,7 @@ dependencies = [
 [[package]]
 name = "signal-belief-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-belief-nexus?rev=6101af90d66517da3f71605a22451de8ccc981c7#6101af90d66517da3f71605a22451de8ccc981c7"
+source = "git+https://github.com/LiGoldragon/signal-belief-nexus?rev=d22d6662a868b78e110bb9c63638c70298ac3c98#d22d6662a868b78e110bb9c63638c70298ac3c98"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",

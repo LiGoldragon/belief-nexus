@@ -7,8 +7,14 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-fn digest() -> public::ContractDigest {
+fn public_digest() -> public::ContractDigest {
     public::ContractDigest(format!("signal:{}", public::Query::contract_digest()))
+}
+fn meta_digest() -> public::ContractDigest {
+    public::ContractDigest(format!("signal:{}", meta::Query::contract_digest()))
+}
+fn emission_digest() -> public::ContractDigest {
+    public::ContractDigest(format!("signal:{}", emission_belief_nexus::Query::contract_digest()))
 }
 
 pub fn run(bootstrap: meta::TranslatorBootstrap) -> Result<(), TranslatorError> {
@@ -37,7 +43,7 @@ fn serve_meta(listener: UnixListener, configuration: Arc<Mutex<TranslatorConfigu
         let configuration = Arc::clone(&configuration);
         std::thread::spawn(move || {
             let result = configuration.lock().map_err(|_| TranslatorError::Configuration("configuration lock poisoned".into()))
-                .and_then(|mut configuration| serve_meta_text(&mut stream, &mut configuration, digest()));
+                .and_then(|mut configuration| serve_meta_text(&mut stream, &mut configuration, meta_digest()));
             if let Err(error) = result { let _ = write_failure(&mut stream, &error); }
         });
     }
@@ -48,14 +54,14 @@ fn serve_ordinary(
     configuration: &Arc<Mutex<TranslatorConfiguration>>,
     paired: &meta::PairedProcess,
 ) -> Result<(), TranslatorError> {
-    let caller = observe_peer(stream, digest())?;
-    let configuration = configuration.lock().map_err(|_| TranslatorError::Configuration("configuration lock poisoned".into()))?;
+    let caller = observe_peer(stream, emission_digest())?;
+    let configuration = configuration.lock().map_err(|_| TranslatorError::Configuration("configuration lock poisoned".into()))?.clone();
     if caller.user_id == paired.user_id && caller.group_id == paired.group_id && caller.process_id == paired.process_id {
         let git = configuration.git_executable().ok_or_else(|| TranslatorError::Configuration("translator is awaiting Git executable".into()))?;
         let executor = FileEmission::new(PathBuf::from(git)).map_err(TranslatorError::Configuration)?;
-        serve_emission(stream, &configuration, paired, digest(), &executor)
+        serve_emission(stream, &configuration, paired, emission_digest(), &executor)
     } else {
-        serve_public_text(stream, &configuration, digest())
+        serve_public_text(stream, &configuration, public_digest())
     }
 }
 
