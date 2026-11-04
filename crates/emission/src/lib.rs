@@ -55,6 +55,7 @@ pub struct SkillFile {
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct WorkspaceImage {
+    pub harness: signal_belief_nexus::Harness,
     pub layout: meta_signal_belief_nexus::Layout,
     pub content: Content,
     pub skill_file_vector: std::vec::Vec<SkillFile>,
@@ -492,7 +493,7 @@ impl FileEmission {
             ));
         }
 
-        paths.prepare_skills_link(publication)
+        paths.prepare_capability_links(publication)
             .map_err(|evidence| publication_refusal(publication, PublicationOperation::StagingGeneration, evidence))?;
         paths.write_settings(publication)
             .map_err(|evidence| publication_refusal(publication, PublicationOperation::StagingSettings, evidence))?;
@@ -644,13 +645,17 @@ impl PublicationPaths {
                 return Err(boundary(&self.workspace, &self.owned));
             }
         }
-        if let Ok(metadata) = fs::symlink_metadata(&self.settings) {
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                return Err(boundary(&self.workspace, &self.settings));
-            }
+        match publication.workspace_image.harness {
+            signal_belief_nexus::Harness::Codex => if let Ok(metadata) = fs::symlink_metadata(&self.settings) {
+                if !metadata.is_file() || metadata.file_type().is_symlink() { return Err(boundary(&self.workspace, &self.settings)); }
+            },
+            signal_belief_nexus::Harness::Claude => if let Ok(metadata) = fs::symlink_metadata(&self.settings) {
+                if !metadata.file_type().is_symlink() || fs::read_link(&self.settings).ok().as_deref() != Some(self.current.join(&self.instructions).as_path()) { return Err(boundary(&self.workspace, &self.settings)); }
+            },
         }
         if let Ok(metadata) = fs::symlink_metadata(&self.skills_link) {
-            if !metadata.file_type().is_symlink() || fs::read_link(&self.skills_link).ok().as_deref() != Some(Path::new("../.belief/current/skills")) {
+            let expected = match publication.workspace_image.harness { signal_belief_nexus::Harness::Codex => PathBuf::from("../.belief/current/skills"), signal_belief_nexus::Harness::Claude => self.current.join("skills") };
+            if !metadata.file_type().is_symlink() || fs::read_link(&self.skills_link).ok().as_deref() != Some(expected.as_path()) {
                 return Err(boundary(&self.workspace, &self.skills_link));
             }
         }
@@ -673,14 +678,18 @@ impl PublicationPaths {
         Ok(self.generations.join(&generation.0))
     }
 
-    fn prepare_skills_link(&self, publication: &Publication) -> Result<(), PublicationEvidence> {
+    fn prepare_capability_links(&self, publication: &Publication) -> Result<(), PublicationEvidence> {
         if self.skills_link.exists() || fs::symlink_metadata(&self.skills_link).is_ok() {
-            return Ok(());
+        } else {
+            let target = match publication.workspace_image.harness { signal_belief_nexus::Harness::Codex => PathBuf::from("../.belief/current/skills"), signal_belief_nexus::Harness::Claude => self.current.join("skills") };
+            symlink(target, &self.skills_link).map_err(|error| io_evidence(&self.skills_link, error))?;
+            sync_parent(&self.skills_link).map_err(|error| io_evidence(&self.skills_link, error))?;
         }
-        symlink("../.belief/current/skills", &self.skills_link)
-            .map_err(|error| io_evidence(&self.skills_link, error))?;
-        sync_parent(&self.skills_link).map_err(|error| io_evidence(&self.skills_link, error))?;
-        let _ = publication;
+        if matches!(publication.workspace_image.harness, signal_belief_nexus::Harness::Claude)
+            && !self.settings.exists() && fs::symlink_metadata(&self.settings).is_err() {
+            symlink(self.current.join(&self.instructions), &self.settings).map_err(|error| io_evidence(&self.settings, error))?;
+            sync_parent(&self.settings).map_err(|error| io_evidence(&self.settings, error))?;
+        }
         Ok(())
     }
 
@@ -690,6 +699,7 @@ impl PublicationPaths {
     }
 
     fn rendered_settings(&self, publication: &Publication) -> Result<Option<String>, PublicationEvidence> {
+        if matches!(publication.workspace_image.harness, signal_belief_nexus::Harness::Claude) { return Ok(None); }
         let existing = match fs::read_to_string(&self.settings) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -975,7 +985,7 @@ mod tests {
             generation_id: GenerationId(generation.into()),
             prior_publication: PriorPublication(prior.map(PublicationRevision)),
             intended_publication: IntendedPublication(PublicationRevision(intended)),
-            workspace_image: WorkspaceImage { layout: layout(), content: Content(instruction.into()), skill_file_vector: skills },
+            workspace_image: WorkspaceImage { harness: signal_belief_nexus::Harness::Codex, layout: layout(), content: Content(instruction.into()), skill_file_vector: skills },
             repository_states: RepositoryStates(vec![RepositoryState {
                 repository: Repository(RepositoryPath("/source".into())),
                 source_revision: SourceRevision(format!("revision-{intended}")),
@@ -998,7 +1008,7 @@ mod tests {
             generation_id: GenerationId("sha256:generation".into()),
             prior_publication: PriorPublication(Some(PublicationRevision(3))),
             intended_publication: IntendedPublication(PublicationRevision(4)),
-            workspace_image: WorkspaceImage { layout: layout(), content: Content("instructions".into()), skill_file_vector: vec![] },
+            workspace_image: WorkspaceImage { harness: signal_belief_nexus::Harness::Codex, layout: layout(), content: Content("instructions".into()), skill_file_vector: vec![] },
             repository_states: RepositoryStates(vec![]),
             found_modules: FoundModules(vec![]),
             missing_modules: MissingModules(vec![ModuleName { kind: Kind::Vision, subject: Subject("missing".into()) }]),

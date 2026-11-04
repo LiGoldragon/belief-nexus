@@ -1,6 +1,6 @@
 ; Emission is represented as a Signal root until ethos-zero supports Emission.
 Signal
-[ :signal_belief_nexus:[ ModuleName Placement Repository RepositoryState Workspace RelativePath
+[ :signal_belief_nexus:[ Harness ModuleName Placement Repository RepositoryState Workspace RelativePath
                           SourceRevision PublicationRevision GenerationId Diagnostic FileFailure ]
   :meta_signal_belief_nexus:[ Layout RetentionPolicy ConfigurationRevision TranslatorConfiguration ] ] ; imports
 [ Snapshot.Repository                                 ; emissions: read one immutable main snapshot
@@ -20,7 +20,7 @@ Signal
   ModuleSource.{ ModuleName RelativePath Option<Placement> Content }
   SourceSnapshot.{ Repository SourceRevision Vector<ModuleSource> }
   SkillFile.{ RelativePath Content }
-  WorkspaceImage.{ Layout Content Vector<SkillFile> }
+  WorkspaceImage.{ Harness Layout Content Vector<SkillFile> }
   RepositoryStates.Vector<RepositoryState>
   FoundModules.Vector<ModuleName>
   MissingModules.Vector<ModuleName>

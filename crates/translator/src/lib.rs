@@ -68,7 +68,7 @@ pub fn restore_meta_response(bytes: Vec<u8>) -> Result<meta::Response, Translato
 }
 
 /// The emission lane is typed binary signal from end to end.
-pub fn execute_emission(bytes: Vec<u8>, caller: &public::Caller) -> Result<Vec<u8>, TranslatorError> {
+pub fn execute_emission(bytes: Vec<u8>, caller: &shared_translator::Caller) -> Result<Vec<u8>, TranslatorError> {
     let attempt = Signal::<emission_belief_nexus::EmissionAttempt>::from(bytes).restore().map_err(|error| TranslatorError::Signal(format!("{error:?}")))?;
     let configuration = TranslatorConfiguration::from_snapshot(&attempt.translator_configuration)?;
     if configuration.revision() != Some(&attempt.configuration_revision) {
@@ -83,41 +83,21 @@ pub fn execute_emission(bytes: Vec<u8>, caller: &public::Caller) -> Result<Vec<u
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AdmittedPeer { pub peer_name: public::PeerName, pub caller: public::Caller }
+pub struct AdmittedPeer { pub peer_id: shared_translator::PeerId, pub caller: shared_translator::Caller }
 
 /// PID, uid, gid and executable are facts observed from this connection.
-pub fn observe_peer(stream: &UnixStream, contract_digest: public::ContractDigest) -> Result<public::Caller, TranslatorError> {
-    let credentials = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
-        .map_err(|error| TranslatorError::Peer(error.to_string()))?;
-    let pid = u32::try_from(credentials.pid()).map_err(|_| TranslatorError::Peer("peer pid is negative".into()))?;
-    let executable = std::fs::read_link(format!("/proc/{pid}/exe")).and_then(std::fs::canonicalize).map_err(TranslatorError::Io)?;
-    Ok(public::Caller {
-        user_id: public::UserId(i64::from(credentials.uid())),
-        group_id: public::GroupId(i64::from(credentials.gid())),
-        process_id: public::ProcessId(i64::from(pid)),
-        executable_path: public::ExecutablePath(executable.to_string_lossy().into_owned()),
-        contract_digest,
-    })
+pub fn observe_peer(stream: &UnixStream, _contract_digest: public::ContractDigest) -> Result<shared_translator::Caller, TranslatorError> {
+    let credentials = shared_translator::unix::peer_credentials(stream).map_err(|error| TranslatorError::Peer(error.to_string()))?;
+    Ok(shared_translator::Caller { process_id: credentials.process_id, user_id: credentials.user_id })
 }
 
-/// Durable authority is PeerName plus uid, gid and canonical executable.
-/// ContractDigest establishes wire compatibility; ProcessId is never configured.
-pub fn admit_peer(caller: public::Caller, peers: &public::PeerList) -> Result<AdmittedPeer, TranslatorError> {
-    let matches = peers.0.iter().filter(|peer| {
-        peer.user_id == caller.user_id && peer.group_id == caller.group_id
-            && canonical_equal(&peer.executable_path.0, &caller.executable_path.0)
-            && peer.contract_digest == caller.contract_digest
-    }).collect::<Vec<_>>();
+pub fn admit_peer(caller: shared_translator::Caller, peers: &public::PeerList) -> Result<AdmittedPeer, TranslatorError> {
+    let matches = peers.0.iter().filter(|peer| peer.peer_identity.user_id == caller.user_id && peer.peer_identity.process_id == caller.process_id).collect::<Vec<_>>();
     match matches.as_slice() {
-        [peer] => Ok(AdmittedPeer { peer_name: peer.peer_name.clone(), caller }),
+        [peer] => Ok(AdmittedPeer { peer_id: peer.peer_id.clone(), caller }),
         [] => Err(TranslatorError::Peer("peer is not configured".into())),
         _ => Err(TranslatorError::Peer("peer identity is ambiguous".into())),
     }
-}
-
-fn canonical_equal(configured: &str, observed: &str) -> bool {
-    std::fs::canonicalize(configured).ok().zip(std::fs::canonicalize(observed).ok())
-        .is_some_and(|(configured, observed)| configured == observed)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -421,8 +401,9 @@ pub fn serve_emission(
     contract_digest: public::ContractDigest,
 ) -> Result<(), TranslatorError> {
     use signal::{FrameReading, FrameWriting};
-    let caller = observe_peer(stream, contract_digest)?;
-    if caller.user_id != expected_process.user_id || caller.group_id != expected_process.group_id || caller.process_id != expected_process.process_id {
+    let credentials = shared_translator::unix::peer_credentials(stream).map_err(|error| TranslatorError::Peer(error.to_string()))?;
+    let caller = shared_translator::Caller { process_id: credentials.process_id.clone(), user_id: credentials.user_id.clone() };
+    if credentials.user_id != expected_process.user_id || credentials.group_id != expected_process.group_id || credentials.process_id != expected_process.process_id {
         return Err(TranslatorError::Peer("caller is not the paired Nexus process".into()));
     }
     let request = Vec::<u8>::from(stream.read_frame(capacity).map_err(signal_error)?);
@@ -451,12 +432,8 @@ impl std::error::Error for TranslatorError {}
 mod tests {
     use super::*;
 
-    fn complete_snapshot(revision: i64, caller: &public::Caller) -> meta::TranslatorConfiguration {
-        let peer = public::PeerIdentity {
-            peer_name: public::PeerName("nexus".into()), user_id: caller.user_id.clone(),
-            group_id: caller.group_id.clone(), executable_path: caller.executable_path.clone(),
-            contract_digest: caller.contract_digest.clone(),
-        };
+    fn complete_snapshot(revision: i64, caller: &shared_translator::Caller) -> meta::TranslatorConfiguration {
+        let peer = shared_translator::PeerBinding { peer_id: shared_translator::PeerId("nexus".into()), peer_identity: shared_translator::PeerIdentity { user_id: caller.user_id.clone(), process_id: caller.process_id.clone() } };
         meta::TranslatorConfiguration {
             configuration_revision: meta::ConfigurationRevision(revision),
             set_vector: vec![
@@ -474,14 +451,10 @@ mod tests {
         }
     }
 
-    fn current_caller() -> public::Caller {
-        let executable = std::fs::canonicalize("/proc/self/exe").unwrap();
-        public::Caller {
-            user_id: public::UserId(i64::from(nix::unistd::getuid().as_raw())),
-            group_id: public::GroupId(i64::from(nix::unistd::getgid().as_raw())),
-            process_id: public::ProcessId(i64::from(std::process::id())),
-            executable_path: public::ExecutablePath(executable.to_string_lossy().into_owned()),
-            contract_digest: public::ContractDigest("emission".into()),
+    fn current_caller() -> shared_translator::Caller {
+        shared_translator::Caller {
+            user_id: shared_translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: shared_translator::ProcessId(i64::from(std::process::id())),
         }
     }
 
@@ -503,12 +476,9 @@ mod tests {
         let digest = public::ContractDigest("sha256:belief".into());
         let caller = observe_peer(&left, digest.clone()).unwrap();
         assert!(caller.process_id.0 > 0);
-        let peers = public::PeerList(vec![public::PeerIdentity {
-            peer_name: public::PeerName("test-peer".into()), user_id: caller.user_id.clone(),
-            group_id: caller.group_id.clone(), executable_path: caller.executable_path.clone(), contract_digest: digest,
-        }]);
+        let peers = public::PeerList(vec![shared_translator::PeerBinding { peer_id: shared_translator::PeerId("test-peer".into()), peer_identity: shared_translator::PeerIdentity { user_id: caller.user_id.clone(), process_id: caller.process_id.clone() } }]);
         let admitted = admit_peer(caller.clone(), &peers).unwrap();
-        assert_eq!(admitted.peer_name, public::PeerName("test-peer".into()));
+        assert_eq!(admitted.peer_id, shared_translator::PeerId("test-peer".into()));
         assert_eq!(admitted.caller.process_id, caller.process_id);
         let call = public_call(&admitted, public::Query::Subscribe);
         let restored = Signal::<public::Call>::from(archive_public_call(&call).unwrap()).restore().unwrap();

@@ -174,13 +174,13 @@ fn serve_ordinary(
     paired: &meta::PairedTranslator,
     admission: &meta::Admission,
 ) -> io::Result<()> {
-    admit(&stream, paired)?;
     configure_stream(&stream, admission)?;
     let capacity = capacity(admission);
     let body = stream.read_frame(capacity).map_err(frame_error)?;
     let call = Signal::<wire::Call>::from(Vec::<u8>::from(body))
         .restore()
         .map_err(restore_error)?;
+    admit_ordinary_call(&stream, paired, &call.caller)?;
     if matches!(call.query, wire::Query::Subscribe) {
         let subscription = daemon.lock().map_err(lock_error)?.open_subscription(call);
         match subscription {
@@ -265,6 +265,18 @@ fn admit(stream: &UnixStream, paired: &meta::PairedTranslator) -> io::Result<()>
             io::ErrorKind::PermissionDenied,
             "unpaired translator",
         ))
+    }
+}
+
+fn admit_ordinary_call(stream: &UnixStream, paired: &meta::PairedTranslator, caller: &translator::Caller) -> io::Result<()> {
+    let credentials = translator::unix::peer_credentials(stream).map_err(io::Error::other)?;
+    let paired_transport = credentials.user_id == paired.user_id
+        && credentials.group_id == paired.group_id
+        && credentials.process_id == paired.process_id;
+    if paired_transport || (credentials.user_id == caller.user_id && credentials.process_id == caller.process_id) {
+        Ok(())
+    } else {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "declared caller does not match live peer"))
     }
 }
 
@@ -353,20 +365,13 @@ mod tests {
     #[test]
     fn authenticated_binary_meta_and_ordinary_sockets_restore_state() {
         let directory = tempfile::tempdir().unwrap();
-        let executable = std::fs::canonicalize("/proc/self/exe").unwrap();
-        let identity = wire::PeerIdentity {
-            peer_name: wire::PeerName("test".into()),
-            user_id: wire::UserId(i64::from(nix::unistd::getuid().as_raw())),
-            group_id: wire::GroupId(i64::from(nix::unistd::getgid().as_raw())),
-            executable_path: wire::ExecutablePath(executable.to_string_lossy().into_owned()),
-            contract_digest: wire::ContractDigest("test".into()),
+        let caller = translator::Caller {
+            user_id: translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: translator::ProcessId(i64::from(std::process::id())),
         };
-        let caller = wire::Caller {
-            user_id: identity.user_id.clone(),
-            group_id: identity.group_id.clone(),
-            process_id: wire::ProcessId(i64::from(std::process::id())),
-            executable_path: identity.executable_path.clone(),
-            contract_digest: identity.contract_digest.clone(),
+        let identity = translator::PeerBinding {
+            peer_id: translator::PeerId("test".into()),
+            peer_identity: translator::PeerIdentity { user_id: caller.user_id.clone(), process_id: caller.process_id.clone() },
         };
         let ordinary = directory.path().join("ordinary.sock");
         let privileged = directory.path().join("meta.sock");
@@ -397,7 +402,7 @@ mod tests {
             },
             paired_translator: meta::PairedTranslator {
                 user_id: caller.user_id.clone(),
-                group_id: caller.group_id.clone(),
+                group_id: translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
                 process_id: caller.process_id.clone(),
             },
             bootstrap_owner: meta::BootstrapOwner(identity.clone()),
@@ -428,7 +433,7 @@ mod tests {
             meta::Set::SubscriberCapacity(2),
             meta::Set::OrdinaryPeers(wire::PeerList(vec![identity.clone()])),
             meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
-            meta::Set::Layout(layout),
+            meta::Set::Layout(meta::HarnessLayout { harness: wire::Harness::Codex, layout }),
             meta::Set::GenerationRetention(meta::RetentionPolicy::KeepAll),
             meta::Set::NexusFrameCapacity(meta::ByteLimit(1_000_000)),
             meta::Set::NexusTransportTimeout(meta::Timeout(1_000)),

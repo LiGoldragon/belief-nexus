@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 pub struct ModuleSource {
     pub name: wire::ModuleName,
     pub relative_path: wire::RelativePath,
+    pub placement: Option<wire::Placement>,
     pub bytes: Vec<u8>,
 }
 
@@ -42,6 +43,7 @@ pub enum ResolveError {
         name: wire::ModuleName,
         repositories: Vec<wire::Repository>,
     },
+    MissingPlacement(wire::Kind),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,7 +70,7 @@ pub enum RecoveryOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicationContext {
-    pub owner: wire::Caller,
+    pub owner: translator::Caller,
     pub configuration_revision: meta::ConfigurationRevision,
     pub layout: meta::Layout,
     pub retention_policy: meta::RetentionPolicy,
@@ -77,7 +79,7 @@ pub struct PublicationContext {
 /// The complete intent that Memory must durably store before Publish is emitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingIntent {
-    pub owner: wire::Caller,
+    pub owner: translator::Caller,
     pub harness: wire::Harness,
     pub configuration_revision: meta::ConfigurationRevision,
     pub requested: Vec<wire::ModuleName>,
@@ -106,6 +108,7 @@ pub struct FurnishPlan {
     pub missing: Vec<wire::ModuleName>,
     pub image: WorkspaceImage,
     pub generation_id: wire::GenerationId,
+    pub placement_defaults: HashMap<wire::Kind, wire::Placement>,
     /// The observed revisions used to construct this exact image.
     pub source_revisions: Vec<(wire::Repository, wire::SourceRevision)>,
 }
@@ -123,7 +126,7 @@ pub struct SuccessfulPublication {
     pub generation_id: wire::GenerationId,
     pub publication_revision: wire::PublicationRevision,
     pub source_revisions: Vec<(wire::Repository, wire::SourceRevision)>,
-    pub placement: wire::Placement,
+    pub furnished_paths: wire::FurnishedPaths,
 }
 
 #[derive(Clone, Debug)]
@@ -238,9 +241,10 @@ impl BeliefCore {
     /// Records the desired workspace request and returns a complete candidate.
     /// If resolution or later publication fails, the previous successful state is
     /// untouched and this request remains eligible for retry.
-    pub fn prepare_furnish(
+    pub fn prepare_furnish_with_defaults(
         &mut self,
         request: wire::FurnishRequest,
+        defaults: &HashMap<wire::Kind, wire::Placement>,
     ) -> Result<FurnishPlan, ResolveError> {
         let workspace = request.workspace.clone();
         let requested = deduplicate_preserving_order(request.module_name_vector);
@@ -271,7 +275,7 @@ impl BeliefCore {
             .zip(&resolved)
             .filter_map(|(name, item)| item.is_none().then_some(name.clone()))
             .collect();
-        let image = build_image(&resolved);
+        let image = build_image(&resolved, defaults)?;
         let source_revisions = all_revisions(&self.repositories);
         let generation_id = generation_id(&workspace, &image);
 
@@ -283,8 +287,21 @@ impl BeliefCore {
             missing,
             image,
             generation_id,
+            placement_defaults: defaults.clone(),
             source_revisions,
         })
+    }
+
+    #[cfg(test)]
+    pub fn prepare_furnish(&mut self, request: wire::FurnishRequest) -> Result<FurnishPlan, ResolveError> {
+        let defaults = HashMap::from([
+            (wire::Kind::Spirit, wire::Placement::SystemPrompt),
+            (wire::Kind::Intent, wire::Placement::SystemPrompt),
+            (wire::Kind::Vision, wire::Placement::Skills),
+            (wire::Kind::Knowledge, wire::Placement::Skills),
+            (wire::Kind::Role, wire::Placement::Skills),
+        ]);
+        self.prepare_furnish_with_defaults(request, &defaults)
     }
 
     /// Persists the exact publication intent in domain state before returning the
@@ -315,7 +332,7 @@ impl BeliefCore {
             generation_id: plan.generation_id.clone(),
             prior_publication: emission::PriorPublication(prior),
             intended_publication: emission::IntendedPublication(intended),
-            workspace_image: emission_image(&plan.image, context.layout.clone())?,
+            workspace_image: emission_image(&plan.image, plan.harness.clone(), context.layout.clone())?,
             repository_states: emission::RepositoryStates(
                 plan.source_revisions
                     .iter()
@@ -436,7 +453,7 @@ impl BeliefCore {
                     generation_id: furnished.generation_id,
                     publication_revision: furnished.publication_revision,
                     source_revisions,
-                    placement: furnished.placement,
+                    furnished_paths: furnished.furnished_paths,
                 }),
                 last_found: furnished.found_vector,
                 last_missing: furnished.module_name_vector,
@@ -487,7 +504,7 @@ impl BeliefCore {
         let Ok(resolved) = self.resolve_sources(&plan.requested) else {
             return false;
         };
-        let image = build_image(&resolved);
+        let Ok(image) = build_image(&resolved, &plan.placement_defaults) else { return false };
         plan.image == image
             && plan.generation_id == generation_id(&plan.workspace, &image)
             && plan.source_revisions == all_revisions(&self.repositories)
@@ -528,7 +545,7 @@ impl BeliefCore {
                 .iter()
                 .map(|state| (state.repository.clone(), state.source_revision.clone()))
                 .collect(),
-            placement: placement(&publication.workspace, &publication.workspace_image.layout),
+            furnished_paths: furnished_paths(&publication.workspace, &publication.workspace_image.layout),
         });
         record.last_found = found_vector.clone();
         record.last_missing = missing.clone();
@@ -536,7 +553,7 @@ impl BeliefCore {
             workspace: workspace.clone(),
             generation_id: publication.generation_id,
             publication_revision: publication.intended_publication.0,
-            placement: placement(&publication.workspace, &publication.workspace_image.layout),
+            furnished_paths: furnished_paths(&publication.workspace, &publication.workspace_image.layout),
             found_vector,
             module_name_vector: missing,
         })
@@ -573,14 +590,14 @@ impl BeliefCore {
     }
 }
 
-fn placement(workspace: &wire::Workspace, layout: &meta::Layout) -> wire::Placement {
+fn furnished_paths(workspace: &wire::Workspace, layout: &meta::Layout) -> wire::FurnishedPaths {
     let root = workspace.0 .0.trim_end_matches('/');
     let owned = layout.owned_root.0 .0.trim_matches('/');
     let current = layout.current_link.0 .0.trim_matches('/');
     let instructions = layout.instructions_file.0 .0.trim_matches('/');
-    wire::Placement {
-        system_prompt: wire::SystemPrompt(format!("{root}/{owned}/{current}/{instructions}")),
-        skills: wire::Skills(format!("{root}/{owned}/{current}/skills")),
+    wire::FurnishedPaths {
+        system_prompt_path: wire::SystemPromptPath(format!("{root}/{owned}/{current}/{instructions}")),
+        skills_path: wire::SkillsPath(format!("{root}/{owned}/{current}/skills")),
     }
 }
 
@@ -595,6 +612,7 @@ impl From<emission::SourceSnapshot> for SourceSnapshot {
                 .map(|module| ModuleSource {
                     name: module.module_name,
                     relative_path: module.relative_path,
+                    placement: module.placement_option,
                     bytes: module.content.0.into_bytes(),
                 })
                 .collect(),
@@ -604,6 +622,7 @@ impl From<emission::SourceSnapshot> for SourceSnapshot {
 
 fn emission_image(
     image: &WorkspaceImage,
+    harness: wire::Harness,
     layout: meta::Layout,
 ) -> Result<emission::WorkspaceImage, PublicationPlanError> {
     let content = String::from_utf8(image.model_instructions.clone()).map_err(|_| {
@@ -626,6 +645,7 @@ fn emission_image(
         });
     }
     Ok(emission::WorkspaceImage {
+        harness,
         layout,
         content: emission::Content(content),
         skill_file_vector,
@@ -761,6 +781,7 @@ fn changed_names(
                 (Some(old), Some(new)) => {
                     old.source.bytes != new.source.bytes
                         || old.source.relative_path != new.source.relative_path
+                        || old.source.placement != new.source.placement
                 }
                 _ => true,
             },
@@ -771,13 +792,14 @@ fn changed_names(
     names
 }
 
-fn build_image(resolved: &[Option<(&wire::Repository, &IndexedModule)>]) -> WorkspaceImage {
+fn build_image(resolved: &[Option<(&wire::Repository, &IndexedModule)>], defaults: &HashMap<wire::Kind, wire::Placement>) -> Result<WorkspaceImage, ResolveError> {
     let mut prompt_modules = Vec::new();
     let mut skills = Vec::new();
     for (_, module) in resolved.iter().flatten() {
-        match module.source.name.kind {
-            wire::Kind::Spirit | wire::Kind::Intent => prompt_modules.push(&module.source),
-            _ => skills.push(SkillAsset {
+        let placement = module.source.placement.clone().or_else(|| defaults.get(&module.source.name.kind).cloned()).ok_or_else(|| ResolveError::MissingPlacement(module.source.name.kind.clone()))?;
+        match placement {
+            wire::Placement::SystemPrompt => prompt_modules.push(&module.source),
+            wire::Placement::Skills => skills.push(SkillAsset {
                 name: module.source.name.clone(),
                 bytes: module.source.bytes.clone(),
             }),
@@ -796,10 +818,10 @@ fn build_image(resolved: &[Option<(&wire::Repository, &IndexedModule)>]) -> Work
             model_instructions.push(b'\n');
         }
     }
-    WorkspaceImage {
+    Ok(WorkspaceImage {
         model_instructions,
         skills,
-    }
+    })
 }
 
 fn all_revisions(
@@ -890,6 +912,7 @@ mod tests {
                 .into_iter()
                 .map(|(name, bytes)| ModuleSource {
                     relative_path: wire::RelativePath(expected_module_path(&name)),
+                    placement: None,
                     name,
                     bytes: bytes.to_vec(),
                 })
@@ -923,12 +946,9 @@ mod tests {
 
     fn publication_context() -> PublicationContext {
         PublicationContext {
-            owner: wire::Caller {
-                user_id: wire::UserId(1000),
-                group_id: wire::GroupId(1000),
-                process_id: wire::ProcessId(42),
-                executable_path: wire::ExecutablePath("/nix/store/client".into()),
-                contract_digest: wire::ContractDigest("sha256:contract".into()),
+            owner: translator::Caller {
+                user_id: translator::UserId(1000),
+                process_id: translator::ProcessId(42),
             },
             configuration_revision: meta::ConfigurationRevision(3),
             layout: layout(),

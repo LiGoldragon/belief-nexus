@@ -75,8 +75,8 @@ fn serve_ordinary(
     paired: &meta::PairedProcess,
     bootstrap_capacity: signal::FrameCapacity,
 ) -> Result<(), TranslatorError> {
-    let caller = observe_peer(stream, emission_digest())?;
-    if caller.user_id == paired.user_id && caller.group_id == paired.group_id && caller.process_id == paired.process_id {
+    let credentials = shared_translator::unix::peer_credentials(stream).map_err(|error| TranslatorError::Peer(error.to_string()))?;
+    if credentials.user_id == paired.user_id && credentials.group_id == paired.group_id && credentials.process_id == paired.process_id {
         serve_emission(stream, bootstrap_capacity, paired, emission_digest())
     } else {
         let mut state = gate.state.lock().map_err(|_| TranslatorError::Configuration("configuration lock poisoned".into()))?;

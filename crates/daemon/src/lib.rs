@@ -44,8 +44,9 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
                 return Err(());
             }
         }
+        let defaults = workspace.placement_defaults.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect();
         let plan = core
-            .prepare_furnish(workspace.request.clone())
+            .prepare_furnish_with_defaults(workspace.request.clone(), &defaults)
             .map_err(|_| ())?;
         let context = || PublicationContext {
             owner: workspace.owner.clone(),
@@ -75,30 +76,12 @@ fn validate_bootstrap(value: &meta::NexusBootstrap) -> Result<(), BootstrapError
     Ok(())
 }
 
-fn peer_allowed(peers: &wire::PeerList, caller: &wire::Caller) -> bool {
-    peers.0.iter().any(|peer| {
-        peer.user_id == caller.user_id
-            && peer.group_id == caller.group_id
-            && peer.executable_path == caller.executable_path
-            && peer.contract_digest == caller.contract_digest
-    })
+fn peer_allowed(peers: &wire::PeerList, caller: &translator::Caller) -> bool {
+    peers.0.iter().any(|peer| peer.peer_identity.user_id == caller.user_id && peer.peer_identity.process_id == caller.process_id)
 }
 
-fn same_owner(first: &wire::Caller, second: &wire::Caller) -> bool {
-    first.user_id == second.user_id && first.group_id == second.group_id
-}
-
-fn empty_layout() -> meta::Layout {
-    let path = wire::RelativePath(String::new());
-    meta::Layout {
-        owned_root: meta::OwnedRoot(path.clone()),
-        generations_directory: meta::GenerationsDirectory(path.clone()),
-        current_link: meta::CurrentLink(path.clone()),
-        settings_file: meta::SettingsFile(path.clone()),
-        instructions_setting: meta::InstructionsSetting(String::new()),
-        instructions_file: meta::InstructionsFile(path.clone()),
-        skills_directory: meta::SkillsDirectory(path),
-    }
+fn same_owner(first: &translator::Caller, second: &translator::Caller) -> bool {
+    first.user_id == second.user_id && first.process_id == second.process_id
 }
 
 fn setting_name(set: &meta::Set) -> meta::SettingName {
@@ -107,7 +90,8 @@ fn setting_name(set: &meta::Set) -> meta::SettingName {
         meta::Set::SubscriberCapacity(_) => meta::SettingName::SubscriberCapacity,
         meta::Set::OrdinaryPeers(_) => meta::SettingName::OrdinaryPeers,
         meta::Set::MetaPeers(_) => meta::SettingName::MetaPeers,
-        meta::Set::Layout(value) => meta::SettingName::Layout(value.clone()),
+        meta::Set::Layout(value) => meta::SettingName::Layout(value.harness.clone()),
+        meta::Set::Placement(value) => meta::SettingName::Placement(value.kind.clone()),
         meta::Set::GenerationRetention(_) => meta::SettingName::GenerationRetention,
         meta::Set::NexusFrameCapacity(_) => meta::SettingName::NexusFrameCapacity,
         meta::Set::NexusTransportTimeout(_) => meta::SettingName::NexusTransportTimeout,
@@ -159,6 +143,7 @@ fn resolve_refusal(error: ResolveError) -> wire::Refusal {
                 }),
             })
         }
+        ResolveError::MissingPlacement(_) => wire::Refusal::NotReady,
     }
 }
 
@@ -175,6 +160,15 @@ fn map_source(
             emission::SourceEvidence::RevisionUnavailable => {
                 wire::SourceEvidence::RevisionUnavailable
             }
+            emission::SourceEvidence::InvalidModule(value) => wire::SourceEvidence::InvalidModule(wire::InvalidModule {
+                module_name: value.module_name,
+                relative_path: value.relative_path,
+                invalid_placement: match value.invalid_placement {
+                    emission::InvalidPlacement::Unknown(value) => wire::InvalidPlacement::Unknown(value),
+                    emission::InvalidPlacement::NonScalar => wire::InvalidPlacement::NonScalar,
+                    emission::InvalidPlacement::Duplicate => wire::InvalidPlacement::Duplicate,
+                },
+            }),
             emission::SourceEvidence::Translator(value) => wire::SourceEvidence::Translator(value),
         },
     }
@@ -290,13 +284,20 @@ mod tests {
         }
     }
 
-    fn caller() -> wire::Caller {
-        wire::Caller {
-            user_id: wire::UserId(1000),
-            group_id: wire::GroupId(1000),
-            process_id: wire::ProcessId(44),
-            executable_path: wire::ExecutablePath("/nix/client".into()),
-            contract_digest: wire::ContractDigest("contract".into()),
+    fn caller() -> translator::Caller {
+        translator::Caller {
+            user_id: translator::UserId(1000),
+            process_id: translator::ProcessId(44),
+        }
+    }
+
+    fn peer() -> translator::PeerBinding {
+        translator::PeerBinding {
+            peer_id: translator::PeerId("client".into()),
+            peer_identity: translator::PeerIdentity {
+                user_id: translator::UserId(1000),
+                process_id: translator::ProcessId(44),
+            },
         }
     }
 
@@ -314,17 +315,11 @@ mod tests {
                     timeout: meta::Timeout(5_000),
                 },
                 paired_translator: meta::PairedTranslator {
-                    user_id: wire::UserId(1000),
-                    group_id: wire::GroupId(1000),
-                    process_id: wire::ProcessId(44),
+                    user_id: translator::UserId(1000),
+                    group_id: translator::GroupId(1000),
+                    process_id: translator::ProcessId(44),
                 },
-                bootstrap_owner: meta::BootstrapOwner(wire::PeerIdentity {
-                    peer_name: wire::PeerName("client".into()),
-                    user_id: wire::UserId(1000),
-                    group_id: wire::GroupId(1000),
-                    executable_path: wire::ExecutablePath("/nix/client".into()),
-                    contract_digest: wire::ContractDigest("contract".into()),
-                }),
+                bootstrap_owner: meta::BootstrapOwner(peer()),
             },
         }
     }
@@ -344,13 +339,7 @@ mod tests {
     }
 
     fn ready_memory() -> MemoryImage {
-        let peer = wire::PeerIdentity {
-            peer_name: wire::PeerName("client".into()),
-            user_id: wire::UserId(1000),
-            group_id: wire::GroupId(1000),
-            executable_path: wire::ExecutablePath("/nix/client".into()),
-            contract_digest: wire::ContractDigest("contract".into()),
-        };
+        let peer = peer();
         MemoryImage {
             configuration: Configuration {
                 revision: meta::ConfigurationRevision(4),
@@ -358,7 +347,14 @@ mod tests {
                 subscriber_capacity: Some(1),
                 ordinary_peers: Some(wire::PeerList(vec![peer.clone()])),
                 meta_peers: Some(wire::PeerList(vec![peer.clone()])),
-                layout: Some(layout()),
+                layouts: vec![meta::HarnessLayout { harness: wire::Harness::Codex, layout: layout() }],
+                placements: vec![
+                    meta::PlacementDefault { kind: wire::Kind::Spirit, placement: wire::Placement::SystemPrompt },
+                    meta::PlacementDefault { kind: wire::Kind::Intent, placement: wire::Placement::SystemPrompt },
+                    meta::PlacementDefault { kind: wire::Kind::Vision, placement: wire::Placement::Skills },
+                    meta::PlacementDefault { kind: wire::Kind::Knowledge, placement: wire::Placement::Skills },
+                    meta::PlacementDefault { kind: wire::Kind::Role, placement: wire::Placement::Skills },
+                ],
                 retention: meta::RetentionPolicy::KeepAll,
                 nexus_frame_capacity: Some(meta::ByteLimit(1_000_000)),
                 nexus_transport_timeout: Some(meta::Timeout(100)),
@@ -403,6 +399,7 @@ mod tests {
             module_source_vector: vec![emission::ModuleSource {
                 module_name: module(),
                 relative_path: wire::RelativePath("vision/nexus.md".into()),
+                placement_option: None,
                 content: emission::Content(content.into()),
             }],
         }
@@ -760,7 +757,8 @@ pub struct Configuration {
     pub subscriber_capacity: Option<i64>,
     pub ordinary_peers: Option<wire::PeerList>,
     pub meta_peers: Option<wire::PeerList>,
-    pub layout: Option<meta::Layout>,
+    pub layouts: Vec<meta::HarnessLayout>,
+    pub placements: Vec<meta::PlacementDefault>,
     pub retention: meta::RetentionPolicy,
     pub nexus_frame_capacity: Option<meta::ByteLimit>,
     pub nexus_transport_timeout: Option<meta::Timeout>,
@@ -775,7 +773,8 @@ impl Configuration {
             subscriber_capacity: None,
             ordinary_peers: None,
             meta_peers: None,
-            layout: None,
+            layouts: Vec::new(),
+            placements: Vec::new(),
             retention: meta::RetentionPolicy::KeepAll,
             nexus_frame_capacity: None,
             nexus_transport_timeout: None,
@@ -796,9 +795,6 @@ impl Configuration {
         }
         if self.meta_peers.is_none() {
             missing.push(meta::SettingName::MetaPeers);
-        }
-        if self.layout.is_none() {
-            missing.push(meta::SettingName::Layout(empty_layout()));
         }
         if self.nexus_frame_capacity.is_none() { missing.push(meta::SettingName::NexusFrameCapacity); }
         if self.nexus_transport_timeout.is_none() { missing.push(meta::SettingName::NexusTransportTimeout); }
@@ -838,20 +834,29 @@ impl Configuration {
     fn ready(&self) -> bool {
         self.missing().is_empty()
     }
+
+    fn layout_for(&self, harness: &wire::Harness) -> Option<meta::Layout> {
+        self.layouts.iter().find(|value| &value.harness == harness).map(|value| value.layout.clone())
+    }
+
+    fn placement_defaults(&self) -> HashMap<wire::Kind, wire::Placement> {
+        self.placements.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect()
+    }
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StoredRepository {
-    pub owner: wire::Caller,
+    pub owner: translator::Caller,
     pub snapshot: emission::SourceSnapshot,
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StoredWorkspace {
-    pub owner: wire::Caller,
+    pub owner: translator::Caller,
     pub request: wire::FurnishRequest,
     pub configuration_revision: meta::ConfigurationRevision,
     pub layout: meta::Layout,
+    pub placement_defaults: Vec<meta::PlacementDefault>,
     pub retention: meta::RetentionPolicy,
     pub successful: Option<wire::FurnishedWorkspace>,
     pub successful_history: Vec<SuccessfulGeneration>,
@@ -907,7 +912,7 @@ pub struct Subscription {
 
 #[derive(Clone, Debug)]
 struct Subscriber {
-    owner: wire::Caller,
+    owner: translator::Caller,
     after: i64,
 }
 
@@ -1065,7 +1070,14 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             meta::Set::MetaPeers(value) => {
                 self.memory.configuration.meta_peers = Some(value.clone())
             }
-            meta::Set::Layout(value) => self.memory.configuration.layout = Some(value.clone()),
+            meta::Set::Layout(value) => {
+                self.memory.configuration.layouts.retain(|current| current.harness != value.harness);
+                self.memory.configuration.layouts.push(value.clone());
+            }
+            meta::Set::Placement(value) => {
+                self.memory.configuration.placements.retain(|current| current.kind != value.kind);
+                self.memory.configuration.placements.push(value.clone());
+            }
             meta::Set::GenerationRetention(value) => {
                 self.memory.configuration.retention = value.clone()
             }
@@ -1174,7 +1186,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.prune_events();
     }
 
-    pub fn subscriber_owner(&self, id: i64) -> Option<&wire::Caller> {
+    pub fn subscriber_owner(&self, id: i64) -> Option<&translator::Caller> {
         Some(&self.subscribers.get(&id)?.owner)
     }
 
@@ -1188,7 +1200,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.events.retain(|event| event.sequence > after);
     }
 
-    fn register(&mut self, owner: wire::Caller, repository: wire::Repository) -> wire::Response {
+    fn register(&mut self, owner: translator::Caller, repository: wire::Repository) -> wire::Response {
         if self
             .memory
             .repositories
@@ -1235,7 +1247,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
 
     fn install_repository(
         &mut self,
-        owner: wire::Caller,
+        owner: translator::Caller,
         snapshot: emission::SourceSnapshot,
     ) -> Result<(), ()> {
         let previous = self.memory.clone();
@@ -1256,7 +1268,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         Ok(())
     }
 
-    fn furnish(&mut self, owner: wire::Caller, request: wire::FurnishRequest) -> wire::Response {
+    fn furnish(&mut self, owner: translator::Caller, request: wire::FurnishRequest) -> wire::Response {
         if self
             .workspace(&request.workspace)
             .is_some_and(|stored| !same_owner(&stored.owner, &owner))
@@ -1287,9 +1299,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         let previous = self.memory.clone();
         let revision = self.memory.configuration.revision.clone();
-        let layout = self.memory.configuration.layout.clone().expect("ready");
+        let Some(layout) = self.memory.configuration.layout_for(&request.harness) else { return wire::Response::Refused(wire::Refusal::NotReady) };
+        let placement_defaults = self.memory.configuration.placements.clone();
+        let defaults = self.memory.configuration.placement_defaults();
         let retention = self.memory.configuration.retention.clone();
-        let plan = match self.core.prepare_furnish(request.clone()) {
+        let plan = match self.core.prepare_furnish_with_defaults(request.clone(), &defaults) {
             Ok(plan) => plan,
             Err(error) => return wire::Response::Refused(resolve_refusal(error)),
         };
@@ -1310,6 +1324,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             stored.request = request.clone();
             stored.configuration_revision = revision;
             stored.layout = layout;
+            stored.placement_defaults = placement_defaults;
             stored.retention = retention;
             stored.pending = Some(publication.clone());
         } else {
@@ -1318,6 +1333,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 request: request.clone(),
                 configuration_revision: revision,
                 layout,
+                placement_defaults,
                 retention,
                 successful: None,
                 successful_history: Vec::new(),
@@ -1613,7 +1629,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
     }
 
-    pub fn subscribe(&mut self, owner: wire::Caller) -> Result<Subscription, wire::Refusal> {
+    pub fn subscribe(&mut self, owner: translator::Caller) -> Result<Subscription, wire::Refusal> {
         let capacity = self.memory.configuration.subscriber_capacity.unwrap_or(0);
         if self.subscribers.len() as i64 >= capacity {
             return Err(wire::Refusal::SubscriberCapacityReached(capacity));
@@ -1756,7 +1772,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.store.store(&self.memory)
     }
 
-    fn authorized_ordinary(&self, caller: &wire::Caller) -> bool {
+    fn authorized_ordinary(&self, caller: &translator::Caller) -> bool {
         self.memory
             .configuration
             .ordinary_peers
@@ -1764,7 +1780,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .is_some_and(|peers| peer_allowed(peers, caller))
     }
 
-    fn authorized_meta(&self, caller: &wire::Caller) -> bool {
+    fn authorized_meta(&self, caller: &translator::Caller) -> bool {
         self.memory
             .configuration
             .meta_peers
