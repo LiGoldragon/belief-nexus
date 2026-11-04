@@ -23,6 +23,7 @@ name = "belief-nexus-daemon"
 version = "0.1.0"
 dependencies = [
  "belief-nexus-core",
+ "belief-nexus-translator",
  "emission-belief-nexus",
  "meta-signal-belief-nexus",
  "nix",
@@ -330,7 +331,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-belief-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=ca9cedf4ad361ff9b57f8e6200afded834a74fbf#ca9cedf4ad361ff9b57f8e6200afded834a74fbf"
+source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=e9131e2#e9131e2a2e67ded202a04054db36bda084d298ca"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",

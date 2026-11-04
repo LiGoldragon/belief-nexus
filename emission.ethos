@@ -2,7 +2,7 @@
 Signal
 [ :signal_belief_nexus:[ ModuleName Repository RepositoryState Workspace RelativePath
                           SourceRevision PublicationRevision GenerationId Diagnostic FileFailure ]
-  :meta_signal_belief_nexus:[ Layout RetentionPolicy ] ] ; imports
+  :meta_signal_belief_nexus:[ Layout RetentionPolicy ConfigurationRevision TranslatorConfiguration ] ] ; imports
 [ Snapshot.Repository                                 ; emissions: read one immutable main snapshot
   Publish.Publication                                 ;   or atomically replace one owned publication
   InspectPublication.InspectionRequest                ;   or observe owned recovery evidence
@@ -13,7 +13,9 @@ Signal
   Cleaned.CleanupState
   CleanupRefused.FileFailure
   EmissionRefused.EmissionRefusal ]
-[ Content.String                                      ; types
+[ EmissionAttempt.{ ConfigurationRevision TranslatorConfiguration Query } ; one immutable attempt snapshot
+  EmissionAttemptOutcome.{ ConfigurationRevision Response } ; response revision equals its attempt
+  Content.String                                      ; types
   AbsolutePath.String
   ModuleSource.{ ModuleName RelativePath Content }
   SourceSnapshot.{ Repository SourceRevision Vector<ModuleSource> }

@@ -7,6 +7,21 @@
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct EmissionAttempt {
+    pub configuration_revision: meta_signal_belief_nexus::ConfigurationRevision,
+    pub translator_configuration: meta_signal_belief_nexus::TranslatorConfiguration,
+    pub query: Query,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct EmissionAttemptOutcome {
+    pub configuration_revision: meta_signal_belief_nexus::ConfigurationRevision,
+    pub response: Response,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Content(pub String);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -260,7 +275,7 @@ pub enum Response {
     CleanupRefused(signal_belief_nexus::FileFailure),
     EmissionRefused(EmissionRefusal),
 }
-/// The authored schema whose digest identifies this internal effect contract.
+
 pub const ETHOS: &str = include_str!("../../../emission.ethos");
 
 impl signal::Contracted for Query {

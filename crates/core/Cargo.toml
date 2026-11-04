@@ -9,6 +9,6 @@ path = "src/lib.rs"
 
 [dependencies]
 emission-belief-nexus = { path = "../emission" }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "ca9cedf4ad361ff9b57f8e6200afded834a74fbf" }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "e9131e2" }
 sha2 = "0.10"
 signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "838cdcaa2c8a54bbb0ece43cbf795ffb698858f4" }
