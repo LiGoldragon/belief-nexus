@@ -223,7 +223,7 @@ impl BeliefCore {
             .collect();
         let image = build_image(&resolved);
         let source_revisions = revisions_used(&resolved, &self.repositories);
-        let generation_id = generation_id(&image);
+        let generation_id = generation_id(&workspace, &image);
 
         Ok(FurnishPlan {
             workspace,
@@ -454,8 +454,9 @@ fn revisions_used(
     revisions
 }
 
-fn generation_id(image: &WorkspaceImage) -> wire::GenerationId {
+fn generation_id(workspace: &wire::Workspace, image: &WorkspaceImage) -> wire::GenerationId {
     let mut digest = Sha256::new();
+    hash_bytes(&mut digest, workspace.0 .0.as_bytes());
     hash_bytes(&mut digest, &image.model_instructions);
     for skill in &image.skills {
         hash_bytes(&mut digest, kind_name(&skill.name.kind).as_bytes());
@@ -720,5 +721,21 @@ mod tests {
             vec![(repo("/r"), wire::SourceRevision("one".into()))]
         );
         assert_eq!(core.retry_workspaces(), vec![workspace("/w")]);
+    }
+
+    #[test]
+    fn identical_images_have_workspace_unique_generation_identity() {
+        let vision = name(wire::Kind::Vision, "nexus");
+        let mut core = BeliefCore::new();
+        core.observe(snapshot("/r", "one", vec![(vision.clone(), b"same")]))
+            .unwrap();
+        let first = core
+            .prepare_furnish(request("/first", vec![vision.clone()]))
+            .unwrap();
+        let second = core
+            .prepare_furnish(request("/second", vec![vision]))
+            .unwrap();
+        assert_eq!(first.image, second.image);
+        assert_ne!(first.generation_id, second.generation_id);
     }
 }
