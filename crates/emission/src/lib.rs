@@ -33,6 +33,7 @@ pub struct AbsolutePath(pub String);
 pub struct ModuleSource {
     pub module_name: signal_belief_nexus::ModuleName,
     pub relative_path: signal_belief_nexus::RelativePath,
+    pub placement_option: std::option::Option<signal_belief_nexus::Placement>,
     pub content: Content,
 }
 #[rustfmt::skip]
@@ -178,10 +179,27 @@ pub enum PublicationOperation {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum InvalidPlacement {
+    Unknown(String),
+    NonScalar,
+    Duplicate,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct InvalidModule {
+    pub module_name: signal_belief_nexus::ModuleName,
+    pub relative_path: signal_belief_nexus::RelativePath,
+    pub invalid_placement: InvalidPlacement,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum SourceEvidence {
     NotRepository,
     MainUnavailable,
     RevisionUnavailable,
+    InvalidModule(InvalidModule),
     Translator(signal_belief_nexus::Diagnostic),
 }
 #[rustfmt::skip]
@@ -275,7 +293,6 @@ pub enum Response {
     CleanupRefused(signal_belief_nexus::FileFailure),
     EmissionRefused(EmissionRefusal),
 }
-
 pub const ETHOS: &str = include_str!("../../../emission.ethos");
 
 impl signal::Contracted for Query {
@@ -389,9 +406,17 @@ impl FileEmission {
                 source_operation: SourceOperation::ReadingTree,
                 source_evidence: SourceEvidence::RevisionUnavailable,
             })?;
+            let relative_path = signal_belief_nexus::RelativePath(path.into());
+            let placement_option = placement_from_frontmatter(&content, &module_name, &relative_path)
+                .map_err(|invalid| SourceRefusal {
+                    repository: repository.clone(),
+                    source_operation: SourceOperation::ReadingTree,
+                    source_evidence: SourceEvidence::InvalidModule(invalid),
+                })?;
             modules.push(ModuleSource {
                 module_name,
-                relative_path: signal_belief_nexus::RelativePath(path.into()),
+                relative_path,
+                placement_option,
                 content: Content(content),
             });
         }
@@ -532,6 +557,34 @@ impl FileEmission {
             Err(evidence) => Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         }
     }
+}
+
+fn placement_from_frontmatter(
+    content: &str,
+    module_name: &signal_belief_nexus::ModuleName,
+    relative_path: &signal_belief_nexus::RelativePath,
+) -> Result<Option<signal_belief_nexus::Placement>, InvalidModule> {
+    let mut lines = content.lines();
+    if lines.next() != Some("---") { return Ok(None); }
+    let frontmatter = lines.take_while(|line| *line != "---");
+    let mut found = None;
+    for line in frontmatter {
+        let Some((key, raw)) = line.split_once(':') else { continue };
+        if key.trim() != "placement" { continue; }
+        if found.is_some() {
+            return Err(InvalidModule { module_name: module_name.clone(), relative_path: relative_path.clone(), invalid_placement: InvalidPlacement::Duplicate });
+        }
+        let value = raw.trim();
+        let placement = match value {
+            "system-prompt" => signal_belief_nexus::Placement::SystemPrompt,
+            "skills" => signal_belief_nexus::Placement::Skills,
+            "" => return Err(InvalidModule { module_name: module_name.clone(), relative_path: relative_path.clone(), invalid_placement: InvalidPlacement::NonScalar }),
+            value if matches!(value.as_bytes().first(), Some(b'[' | b'{' | b'|' | b'>')) => return Err(InvalidModule { module_name: module_name.clone(), relative_path: relative_path.clone(), invalid_placement: InvalidPlacement::NonScalar }),
+            value => return Err(InvalidModule { module_name: module_name.clone(), relative_path: relative_path.clone(), invalid_placement: InvalidPlacement::Unknown(value.into()) }),
+        };
+        found = Some(placement);
+    }
+    Ok(found)
 }
 
 impl Publication {
@@ -885,6 +938,18 @@ mod tests {
         CurrentLink, GenerationsDirectory, InstructionsFile, InstructionsSetting, Layout,
         OwnedRoot, SettingsFile, SkillsDirectory,
     };
+
+    #[test]
+    fn frontmatter_placement_is_exact_typed_and_optional() {
+        let name = signal_belief_nexus::ModuleName { kind: signal_belief_nexus::Kind::Vision, subject: signal_belief_nexus::Subject("nexus".into()) };
+        let path = signal_belief_nexus::RelativePath("vision/nexus.md".into());
+        assert_eq!(placement_from_frontmatter("body", &name, &path).unwrap(), None);
+        assert_eq!(placement_from_frontmatter("---\nplacement: system-prompt\n---\nbody", &name, &path).unwrap(), Some(signal_belief_nexus::Placement::SystemPrompt));
+        assert_eq!(placement_from_frontmatter("---\nplacement: skills\n---\nbody", &name, &path).unwrap(), Some(signal_belief_nexus::Placement::Skills));
+        assert!(matches!(placement_from_frontmatter("---\nplacement: elsewhere\n---", &name, &path).unwrap_err().invalid_placement, InvalidPlacement::Unknown(_)));
+        assert!(matches!(placement_from_frontmatter("---\nplacement: [skills]\n---", &name, &path).unwrap_err().invalid_placement, InvalidPlacement::NonScalar));
+        assert!(matches!(placement_from_frontmatter("---\nplacement: skills\nplacement: system-prompt\n---", &name, &path).unwrap_err().invalid_placement, InvalidPlacement::Duplicate));
+    }
     use signal::{ByteViewable, Restorable, Signal, Signalizable};
     use signal_belief_nexus::{
         GenerationId, Kind, ModuleName, PublicationRevision, RelativePath, Repository,
