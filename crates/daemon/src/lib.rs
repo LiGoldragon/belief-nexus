@@ -87,10 +87,7 @@ fn peer_allowed(peers: &wire::PeerList, caller: &wire::Caller) -> bool {
 }
 
 fn same_owner(first: &wire::Caller, second: &wire::Caller) -> bool {
-    first.user_id == second.user_id
-        && first.group_id == second.group_id
-        && first.executable_path == second.executable_path
-        && first.contract_digest == second.contract_digest
+    first.user_id == second.user_id && first.group_id == second.group_id
 }
 
 fn empty_layout() -> meta::Layout {
@@ -509,12 +506,9 @@ mod tests {
             image: Some(durable),
             ..Default::default()
         };
-        let mut second = Daemon::start(bootstrap(), effects, memory).unwrap();
-        assert!(matches!(
-            second.recover_pending().as_slice(),
-            [wire::Response::Furnished(_)]
-        ));
+        let second = Daemon::start(bootstrap(), effects, memory).unwrap();
         assert!(second.memory.workspaces[0].pending.is_none());
+        assert!(second.memory.workspaces[0].successful.is_some());
     }
 
     #[test]
@@ -798,7 +792,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .map_err(BootstrapError::Memory)?
             .unwrap_or_else(MemoryImage::empty);
         let core = rebuild_core(&memory).map_err(|_| BootstrapError::CorruptState)?;
-        Ok(Self {
+        let mut daemon = Self {
             bootstrap: bootstrap.nexus,
             effects,
             store,
@@ -807,7 +801,9 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             events: Vec::new(),
             subscribers: HashMap::new(),
             next_subscriber: 1,
-        })
+        };
+        daemon.recover_pending();
+        Ok(daemon)
     }
 
     pub fn handle(&mut self, call: wire::Call) -> wire::Response {
@@ -819,11 +815,21 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         match call.query {
             wire::Query::Register(repository) => self.register(call.caller, repository),
-            wire::Query::Resolve(names) => self
-                .core
-                .resolve(&names)
-                .map(wire::Response::Resolved)
-                .unwrap_or_else(|error| wire::Response::Refused(resolve_refusal(error))),
+            wire::Query::Resolve(names) => {
+                if self
+                    .memory
+                    .repositories
+                    .iter()
+                    .any(|repository| !same_owner(&repository.owner, &call.caller))
+                {
+                    wire::Response::Refused(wire::Refusal::NotAuthorized(call.caller))
+                } else {
+                    self.core
+                        .resolve(&names)
+                        .map(wire::Response::Resolved)
+                        .unwrap_or_else(|error| wire::Response::Refused(resolve_refusal(error)))
+                }
+            }
             wire::Query::Furnish(request) => self.furnish(call.caller, request),
             wire::Query::Subscribe => self
                 .subscribe(call.caller)
@@ -869,6 +875,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 },
             ));
         }
+        let previous = self.memory.configuration.clone();
         match &set {
             meta::Set::RepositoryPolling(value) => {
                 self.memory.configuration.repository_polling = Some(value.clone())
@@ -898,6 +905,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         self.memory.configuration.revision.0 += 1;
         if self.persist().is_err() {
+            self.memory.configuration = previous;
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
         }
         meta::Response::Configured(meta::ConfiguredState {
@@ -984,6 +992,14 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
 
     fn register(&mut self, owner: wire::Caller, repository: wire::Repository) -> wire::Response {
         if self
+            .memory
+            .repositories
+            .iter()
+            .any(|stored| !same_owner(&stored.owner, &owner))
+        {
+            return wire::Response::Refused(wire::Refusal::NotAuthorized(owner));
+        }
+        if self
             .repository(&repository)
             .is_some_and(|stored| !same_owner(&stored.owner, &owner))
         {
@@ -1028,6 +1044,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         owner: wire::Caller,
         snapshot: emission::SourceSnapshot,
     ) -> Result<(), ()> {
+        let previous = self.memory.clone();
         self.core.observe(snapshot.clone().into()).map_err(|_| ())?;
         if let Some(stored) = self.repository_mut(&snapshot.repository) {
             stored.snapshot = snapshot;
@@ -1037,7 +1054,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 .push(StoredRepository { owner, snapshot });
         }
         self.sort();
-        self.persist().map_err(|_| ())
+        if self.persist().is_err() {
+            self.memory = previous;
+            self.core = rebuild_core(&self.memory).map_err(|_| ())?;
+            return Err(());
+        }
+        Ok(())
     }
 
     fn furnish(&mut self, owner: wire::Caller, request: wire::FurnishRequest) -> wire::Response {
@@ -1047,6 +1069,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         {
             return wire::Response::Refused(wire::Refusal::NotAuthorized(owner));
         }
+        let previous = self.memory.clone();
         let revision = self.memory.configuration.revision.clone();
         let layout = self.memory.configuration.layout.clone().expect("ready");
         let retention = self.memory.configuration.retention.clone();
@@ -1087,6 +1110,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         self.sort();
         if self.persist().is_err() {
+            self.memory = previous;
+            if let Ok(core) = rebuild_core(&self.memory) {
+                self.core = core;
+            }
             return wire::Response::Refused(memory_refusal(
                 wire::MemoryOperation::BeginningPublication,
             ));
@@ -1113,10 +1140,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 }
                 if let Err(error) = self.persist() {
                     if let Some(before) = before {
-                        self.restore_pending_core(before.clone());
                         if let Some(stored) = self.workspace_mut(&state.workspace) {
                             *stored = before;
                         }
+                    }
+                    if let Ok(core) = rebuild_core(&self.memory) {
+                        self.core = core;
                     }
                     let answer =
                         wire::Response::MemoryAfterPublication(wire::MemoryAfterPublication {
@@ -1186,6 +1215,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             emission::Response::Inspected(inspection) => {
                 match self.core.recover_publication(&inspection) {
                     Ok(RecoveryOutcome::Finalized(furnished)) => {
+                        let previous = self.memory.clone();
                         if let Some(record) = self.workspace_mut(workspace) {
                             record.successful = Some(furnished.clone());
                             record.successful_basis = record
@@ -1196,6 +1226,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                             record.pending = None;
                         }
                         if self.persist().is_err() {
+                            self.memory = previous;
+                            if let Ok(core) = rebuild_core(&self.memory) {
+                                self.core = core;
+                            }
                             return Some(wire::Response::MemoryAfterPublication(
                                 wire::MemoryAfterPublication {
                                     workspace: workspace.clone(),
@@ -1223,6 +1257,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     fn apply_snapshot(&mut self, snapshot: emission::SourceSnapshot) {
+        let previous = self.memory.clone();
         let repository = snapshot.repository.clone();
         let revision = snapshot.source_revision.clone();
         let change = match self.core.observe(snapshot.clone().into()) {
@@ -1239,6 +1274,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             stored.snapshot = snapshot;
         }
         if self.persist().is_err() {
+            self.memory = previous;
+            if let Ok(core) = rebuild_core(&self.memory) {
+                self.core = core;
+            }
             return;
         }
         self.event(wire::Response::Changed(wire::Change {
@@ -1273,7 +1312,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
     }
 
-    fn subscribe(&mut self, owner: wire::Caller) -> Result<Subscription, wire::Refusal> {
+    pub fn subscribe(&mut self, owner: wire::Caller) -> Result<Subscription, wire::Refusal> {
         let capacity = self.memory.configuration.subscriber_capacity.unwrap_or(0);
         if self.subscribers.len() as i64 >= capacity {
             return Err(wire::Refusal::SubscriberCapacityReached(capacity));
@@ -1288,6 +1327,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 after: initial.sequence,
             },
         );
+        if self.persist().is_err() {
+            self.subscribers.remove(&id);
+            return Err(memory_refusal(wire::MemoryOperation::Recording));
+        }
         Ok(Subscription { id, initial })
     }
 
@@ -1302,20 +1345,6 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         wire::BeliefState {
             repository_state_vector: self.core.repository_states(),
             furnished_workspace_vector: furnished,
-        }
-    }
-
-    fn restore_pending_core(&mut self, stored: StoredWorkspace) {
-        if let Ok(plan) = self.core.prepare_furnish(stored.request) {
-            let _ = self.core.begin_publication(
-                &plan,
-                PublicationContext {
-                    owner: stored.owner,
-                    configuration_revision: stored.configuration_revision,
-                    layout: stored.layout,
-                    retention_policy: stored.retention,
-                },
-            );
         }
     }
 
