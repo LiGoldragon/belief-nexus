@@ -6,3 +6,7 @@ license = "MIT"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+sha2 = "0.10"
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "329baa0" }
