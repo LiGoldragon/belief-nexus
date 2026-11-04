@@ -208,6 +208,26 @@ pub fn text_request(socket: &Path, text: &str, capacity: signal::FrameCapacity) 
     String::from_utf8(Vec::<u8>::from(body)).map_err(|error| TranslatorError::Text(error.to_string()))
 }
 
+pub fn text_request_stream(
+    socket: &Path,
+    text: &str,
+    capacity: signal::FrameCapacity,
+    mut receive: impl FnMut(String) -> bool,
+) -> Result<(), TranslatorError> {
+    use signal::{FrameReading, FrameWriting};
+    let mut stream = UnixStream::connect(socket).map_err(TranslatorError::Io)?;
+    stream.write_frame(&signal::FrameBody::from(text.as_bytes().to_vec()), capacity).map_err(signal_error)?;
+    loop {
+        let body = match stream.read_frame(capacity) {
+            Ok(body) => body,
+            Err(signal::FrameError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(error) => return Err(signal_error(error)),
+        };
+        let answer = String::from_utf8(Vec::<u8>::from(body)).map_err(|error| TranslatorError::Text(error.to_string()))?;
+        if !receive(answer) { return Ok(()); }
+    }
+}
+
 pub fn forward_signal(socket: &Path, request: Vec<u8>, capacity: signal::FrameCapacity, timeout: Duration) -> Result<Vec<u8>, TranslatorError> {
     use signal::{FrameReading, FrameWriting};
     let mut stream = UnixStream::connect(socket).map_err(TranslatorError::Io)?;
@@ -234,11 +254,37 @@ pub fn serve_public_text(
     let body = stream.read_frame(capacity).map_err(signal_error)?;
     let text = String::from_utf8(Vec::<u8>::from(body)).map_err(|error| TranslatorError::Text(error.to_string()))?;
     let query = decode_public(&text, limits)?;
+    let subscription = matches!(query, public::Query::Subscribe);
     let caller = observe_peer(stream, contract_digest)?;
     let request = archive(&public::Call { caller, query })?;
+    if subscription {
+        return forward_public_stream(stream, Path::new(target), request, capacity, timeout);
+    }
     let answer = forward_signal(Path::new(target), request, capacity, timeout)?;
     let response = restore_public_response(answer)?;
     stream.write_frame(&signal::FrameBody::from(encode_public(&response).into_bytes()), capacity).map_err(signal_error)
+}
+
+fn forward_public_stream(
+    client: &mut UnixStream,
+    target: &Path,
+    request: Vec<u8>,
+    capacity: signal::FrameCapacity,
+    write_timeout: Duration,
+) -> Result<(), TranslatorError> {
+    use signal::{FrameReading, FrameWriting};
+    let mut nexus = UnixStream::connect(target).map_err(TranslatorError::Io)?;
+    nexus.set_write_timeout(Some(write_timeout)).map_err(TranslatorError::Io)?;
+    nexus.write_frame(&signal::FrameBody::from(request), capacity).map_err(signal_error)?;
+    client.set_write_timeout(Some(write_timeout)).map_err(TranslatorError::Io)?;
+    loop {
+        // A quiet subscription deliberately has no request/read idle timeout.
+        let body = nexus.read_frame(capacity).map_err(signal_error)?;
+        let response = restore_public_response(Vec::<u8>::from(body))?;
+        let terminal = matches!(response, public::Response::SubscriptionClosed(_));
+        client.write_frame(&signal::FrameBody::from(encode_public(&response).into_bytes()), capacity).map_err(signal_error)?;
+        if terminal { return Ok(()); }
+    }
 }
 
 /// Serve one meta text request and apply an acknowledged translator-owned
