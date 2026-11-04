@@ -15,6 +15,40 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TextLimits { pub nodes: usize, pub depth: usize }
 
+#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, Eq, PartialEq)]
+pub struct NexusExecutable(pub String);
+#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, Eq, PartialEq)]
+pub struct TranslatorExecutable(pub String);
+#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, Eq, PartialEq)]
+pub struct SocketName(pub String);
+#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, Eq, PartialEq)]
+pub struct MemoryFileName(pub String);
+#[derive(datom_codec::Datomizable, datom_codec::Composing, Clone, Debug, Eq, PartialEq)]
+pub struct Deployment {
+    pub nexus_executable: NexusExecutable,
+    pub translator_executable: TranslatorExecutable,
+    pub ordinary_socket_name: SocketName,
+    pub meta_socket_name: SocketName,
+    pub ordinary_translator_socket_name: SocketName,
+    pub meta_translator_socket_name: SocketName,
+    pub memory_file_name: MemoryFileName,
+    pub admission: meta::Admission,
+    pub owner: public::Owner,
+    pub set_vector: Vec<meta::Set>,
+}
+
+pub fn deployment_from_text(text: &str) -> Result<Deployment, TranslatorError> {
+    decode(text, TextLimits { nodes: 10_000, depth: 64 })
+}
+
+pub fn place_from_text(text: &str) -> Result<shared_translator::Place, TranslatorError> {
+    decode(text, TextLimits { nodes: 100, depth: 8 })
+}
+
+pub fn decode_meta_response_text(text: &str) -> Result<meta::Response, TranslatorError> {
+    decode(text, TextLimits { nodes: 10_000, depth: 64 })
+}
+
 impl TextLimits {
     pub fn validate(self) -> Result<Self, TranslatorError> {
         if self.nodes == 0 || self.depth == 0 || self.nodes > signal::MAXIMUM_SIGNAL_BYTES || self.depth > signal::MAXIMUM_SIGNAL_DEPTH {
@@ -149,7 +183,7 @@ impl TranslatorConfiguration {
         let mut configuration = Self::default();
         let mut seen = std::collections::HashSet::new();
         for set in &snapshot.set_vector {
-            if owner(set) != meta::Owner::Translator {
+            if owner(set) != meta::Keeper::Translator {
                 return Err(TranslatorError::Configuration("Nexus-owned setting in translator snapshot".into()));
             }
             let name = std::mem::discriminant(set);
@@ -171,7 +205,7 @@ impl TranslatorConfiguration {
         let mut seen = std::collections::HashSet::new();
         let mut candidate = self.clone();
         for set in &snapshot.set_vector {
-            if owner(set) != meta::Owner::Translator || !seen.insert(std::mem::discriminant(set)) {
+            if owner(set) != meta::Keeper::Translator || !seen.insert(std::mem::discriminant(set)) {
                 return Err(TranslatorError::Configuration("invalid translator configuration snapshot".into()));
             }
             candidate.apply_set(set.clone())?;
@@ -195,7 +229,7 @@ impl TranslatorConfiguration {
             return Err(TranslatorError::Configuration("non-coherent configuration revision".into()));
         }
         let mut candidate = self.clone();
-        if configured.owner == meta::Owner::Translator {
+        if configured.keeper == meta::Keeper::Translator {
             candidate.apply_set(configured.set.clone())?;
         }
         candidate.revision = Some(configured.configuration_revision.clone());
@@ -411,13 +445,13 @@ pub fn serve_emission(
     stream.write_frame(&signal::FrameBody::from(answer), capacity).map_err(signal_error)
 }
 
-pub fn owner(setting: &meta::Set) -> meta::Owner {
+pub fn owner(setting: &meta::Set) -> meta::Keeper {
     match setting {
         meta::Set::NexusSocket(_) | meta::Set::MetaNexusSocket(_) | meta::Set::CallTimeout(_)
         | meta::Set::OutputLimit(_) | meta::Set::TextBudget(_) | meta::Set::TranslatorFrameCapacity(_)
-        | meta::Set::TranslatorTransportTimeout(_) | meta::Set::AllowedNexusPeers(_) => meta::Owner::Translator,
-        meta::Set::GitExecutable(_) => meta::Owner::Translator,
-        _ => meta::Owner::Nexus,
+        | meta::Set::TranslatorTransportTimeout(_) | meta::Set::AllowedNexusPeers(_) => meta::Keeper::Translator,
+        meta::Set::GitExecutable(_) => meta::Keeper::Translator,
+        _ => meta::Keeper::Nexus,
     }
 }
 
@@ -489,7 +523,7 @@ mod tests {
     fn configuration_rejects_revision_gaps_without_mutation() {
         let mut configuration = TranslatorConfiguration::default();
         let gap = meta::ConfiguredState {
-            set: meta::Set::CallTimeout(meta::Timeout(100)), owner: meta::Owner::Translator,
+            set: meta::Set::CallTimeout(meta::Timeout(100)), keeper: meta::Keeper::Translator,
             configuration_revision: meta::ConfigurationRevision(2), readiness: meta::Readiness::Awaiting(vec![]),
         };
         assert!(configuration.apply(&gap).is_err());

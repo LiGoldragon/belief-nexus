@@ -76,12 +76,13 @@ fn validate_bootstrap(value: &meta::NexusBootstrap) -> Result<(), BootstrapError
     Ok(())
 }
 
-fn peer_allowed(peers: &wire::PeerList, caller: &translator::Caller) -> bool {
-    peers.0.iter().any(|peer| peer.peer_identity.user_id == caller.user_id && peer.peer_identity.process_id == caller.process_id)
+fn peer_owner(peers: &wire::PeerList, caller: &translator::Caller) -> Option<wire::Owner> {
+    peers.0.iter().find(|peer| peer.peer_identity.user_id == caller.user_id && peer.peer_identity.process_id == caller.process_id)
+        .map(|peer| wire::Owner::Peer(peer.peer_id.clone()))
 }
 
-fn same_owner(first: &translator::Caller, second: &translator::Caller) -> bool {
-    first.user_id == second.user_id && first.process_id == second.process_id
+fn same_owner(first: &wire::Owner, second: &wire::Owner) -> bool {
+    first == second
 }
 
 fn setting_name(set: &meta::Set) -> meta::SettingName {
@@ -107,13 +108,13 @@ fn setting_name(set: &meta::Set) -> meta::SettingName {
     }
 }
 
-fn setting_owner(set: &meta::Set) -> meta::Owner {
+fn setting_owner(set: &meta::Set) -> meta::Keeper {
     match set {
         meta::Set::NexusSocket(_) | meta::Set::MetaNexusSocket(_) | meta::Set::CallTimeout(_)
         | meta::Set::OutputLimit(_) | meta::Set::TextBudget(_) | meta::Set::TranslatorFrameCapacity(_)
         | meta::Set::TranslatorTransportTimeout(_) | meta::Set::AllowedNexusPeers(_)
-        | meta::Set::GitExecutable(_) => meta::Owner::Translator,
-        _ => meta::Owner::Nexus,
+        | meta::Set::GitExecutable(_) => meta::Keeper::Translator,
+        _ => meta::Keeper::Nexus,
     }
 }
 
@@ -319,7 +320,7 @@ mod tests {
                     group_id: translator::GroupId(1000),
                     process_id: translator::ProcessId(44),
                 },
-                bootstrap_owner: meta::BootstrapOwner(peer()),
+                bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(translator::UserId(1000))),
             },
         }
     }
@@ -341,6 +342,7 @@ mod tests {
     fn ready_memory() -> MemoryImage {
         let peer = peer();
         MemoryImage {
+            owner: wire::Owner::Login(translator::UserId(1000)),
             configuration: Configuration {
                 revision: meta::ConfigurationRevision(4),
                 repository_polling: Some(meta::Timeout(100)),
@@ -419,6 +421,56 @@ mod tests {
             query: wire::Query::Register(repository()),
         });
         assert!(matches!(response, wire::Response::Registered(_)));
+    }
+
+    #[test]
+    fn login_owner_survives_cli_pid_changes_and_meta_rejects_other_login() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ].into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let memory = FakeMemory { image: Some(ready_memory()), ..Default::default() };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+        let registered = daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(repository()) });
+        assert!(matches!(registered, wire::Response::Registered(_)));
+        let second = translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(999) };
+        let furnished = daemon.handle(wire::Call { caller: second.clone(), query: wire::Query::Furnish(furnish_request()) });
+        assert!(matches!(furnished, wire::Response::Furnished(_)), "same login lost ownership: {furnished:?}");
+
+        let current = daemon.memory.configuration.revision.clone();
+        let configured = daemon.configure(meta::MetaCall { caller: second, query: meta::Query::Configure(meta::ConfigureRequest {
+            configuration_revision_option: Some(current), set: meta::Set::RepositoryPolling(meta::Timeout(200)),
+        }) });
+        assert!(matches!(configured, meta::Response::Configured(_)));
+        let refused = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(2000), process_id: translator::ProcessId(999) }, query: meta::Query::Configure(meta::ConfigureRequest {
+            configuration_revision_option: Some(daemon.memory.configuration.revision.clone()), set: meta::Set::RepositoryPolling(meta::Timeout(300)),
+        }) });
+        assert!(matches!(refused, meta::Response::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(_))));
+    }
+
+    #[test]
+    fn configured_direct_peers_are_isolated_by_peer_id() {
+        let mut image = ready_memory();
+        let peer_two = translator::PeerBinding { peer_id: translator::PeerId("other".into()), peer_identity: translator::PeerIdentity { user_id: translator::UserId(1000), process_id: translator::ProcessId(55) } };
+        image.configuration.ordinary_peers.as_mut().unwrap().0.push(peer_two);
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ].into(), ..Default::default()
+        };
+        let memory = FakeMemory { image: Some(image), ..Default::default() };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+        let first = wire::Owner::Peer(translator::PeerId("client".into()));
+        let registered = daemon.handle_as(wire::Call { caller: caller(), query: wire::Query::Register(repository()) }, first);
+        assert!(matches!(registered, wire::Response::Registered(_)));
+        let second_caller = translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(55) };
+        let response = daemon.handle_as(wire::Call { caller: second_caller, query: wire::Query::Resolve(vec![module()]) }, wire::Owner::Peer(translator::PeerId("other".into())));
+        assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotAuthorized(_))));
     }
 
     #[test]
@@ -561,13 +613,13 @@ mod tests {
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
         register(&mut daemon);
         assert!(daemon.poll_once().is_empty());
-        let first = daemon.subscribe(caller()).unwrap();
+        let first = daemon.subscribe(wire::Owner::Login(caller().user_id)).unwrap();
         assert!(matches!(
-            daemon.subscribe(caller()),
+            daemon.subscribe(wire::Owner::Login(caller().user_id)),
             Err(wire::Refusal::SubscriberCapacityReached(1))
         ));
         daemon.unsubscribe(first.id);
-        assert!(daemon.subscribe(caller()).is_ok());
+        assert!(daemon.subscribe(wire::Owner::Login(caller().user_id)).is_ok());
     }
 
     #[test]
@@ -846,13 +898,13 @@ impl Configuration {
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StoredRepository {
-    pub owner: translator::Caller,
+    pub owner: wire::Owner,
     pub snapshot: emission::SourceSnapshot,
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct StoredWorkspace {
-    pub owner: translator::Caller,
+    pub owner: wire::Owner,
     pub request: wire::FurnishRequest,
     pub configuration_revision: meta::ConfigurationRevision,
     pub layout: meta::Layout,
@@ -879,6 +931,7 @@ pub struct CleanupMaintenance {
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MemoryImage {
+    pub owner: wire::Owner,
     pub configuration: Configuration,
     pub repositories: Vec<StoredRepository>,
     pub workspaces: Vec<StoredWorkspace>,
@@ -887,8 +940,9 @@ pub struct MemoryImage {
 }
 
 impl MemoryImage {
-    fn empty() -> Self {
+    fn empty(owner: wire::Owner) -> Self {
         Self {
+            owner,
             configuration: Configuration::empty(),
             repositories: Vec::new(),
             workspaces: Vec::new(),
@@ -912,7 +966,7 @@ pub struct Subscription {
 
 #[derive(Clone, Debug)]
 struct Subscriber {
-    owner: translator::Caller,
+    owner: wire::Owner,
     after: i64,
 }
 
@@ -934,13 +988,9 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     ) -> Result<Self, BootstrapError> {
         validate_bootstrap(&bootstrap.nexus)?;
         let loaded = store.load().map_err(BootstrapError::Memory)?;
-        let mut memory = loaded.clone().unwrap_or_else(MemoryImage::empty);
+        let bootstrap_owner = bootstrap.nexus.bootstrap_owner.0.clone();
+        let mut memory = loaded.clone().unwrap_or_else(|| MemoryImage::empty(bootstrap_owner));
         if loaded.is_none() {
-            memory.configuration.meta_peers = Some(wire::PeerList(vec![bootstrap
-                .nexus
-                .bootstrap_owner
-                .0
-                .clone()]));
             store.store(&memory).map_err(BootstrapError::Memory)?;
         }
         let core = rebuild_core(&memory).map_err(|_| BootstrapError::CorruptState)?;
@@ -969,20 +1019,25 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn handle(&mut self, call: wire::Call) -> wire::Response {
-        if !self.authorized_ordinary(&call.caller) {
+        let owner = wire::Owner::Login(call.caller.user_id.clone());
+        self.handle_as(call, owner)
+    }
+
+    pub fn handle_as(&mut self, call: wire::Call, owner: wire::Owner) -> wire::Response {
+        if !self.owner_allowed(&owner) {
             return wire::Response::Refused(wire::Refusal::NotAuthorized(call.caller));
         }
         if !self.memory.configuration.ready() {
             return wire::Response::Refused(wire::Refusal::NotReady);
         }
         match call.query {
-            wire::Query::Register(repository) => self.register(call.caller, repository),
+            wire::Query::Register(repository) => self.register(owner, call.caller, repository),
             wire::Query::Resolve(names) => {
                 if self
                     .memory
                     .repositories
                     .iter()
-                    .any(|repository| !same_owner(&repository.owner, &call.caller))
+                    .any(|repository| !same_owner(&repository.owner, &owner))
                 {
                     wire::Response::Refused(wire::Refusal::NotAuthorized(call.caller))
                 } else {
@@ -992,16 +1047,21 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                         .unwrap_or_else(|error| wire::Response::Refused(resolve_refusal(error)))
                 }
             }
-            wire::Query::Furnish(request) => self.furnish(call.caller, request),
+            wire::Query::Furnish(request) => self.furnish(owner, call.caller, request),
             wire::Query::Subscribe => self
-                .subscribe(call.caller)
+                .subscribe(owner)
                 .map(|subscription| subscription.initial.response)
                 .unwrap_or_else(wire::Response::Refused),
         }
     }
 
     pub fn open_subscription(&mut self, call: wire::Call) -> Result<Subscription, wire::Response> {
-        if !self.authorized_ordinary(&call.caller) {
+        let owner = wire::Owner::Login(call.caller.user_id.clone());
+        self.open_subscription_as(call, owner)
+    }
+
+    pub fn open_subscription_as(&mut self, call: wire::Call, owner: wire::Owner) -> Result<Subscription, wire::Response> {
+        if !self.owner_allowed(&owner) {
             return Err(wire::Response::Refused(wire::Refusal::NotAuthorized(
                 call.caller,
             )));
@@ -1012,7 +1072,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         if !matches!(call.query, wire::Query::Subscribe) {
             return Err(wire::Response::Refused(wire::Refusal::NotReady));
         }
-        self.subscribe(call.caller).map_err(wire::Response::Refused)
+        self.subscribe(owner).map_err(wire::Response::Refused)
     }
 
     pub fn polling_timeout(&self) -> Option<meta::Timeout> {
@@ -1020,7 +1080,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn configure(&mut self, call: meta::MetaCall) -> meta::Response {
-        if !self.authorized_meta(&call.caller) {
+        if self.memory.owner != wire::Owner::Login(call.caller.user_id.clone()) {
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(
                 call.caller,
             ));
@@ -1050,7 +1110,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         if let Some(message) = invalid {
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Invalid(
                 meta::Invalid {
-                    owner: meta::Owner::Nexus,
+                    keeper: meta::Keeper::Nexus,
                     setting_name: setting_name(&set),
                     string: message.into(),
                 },
@@ -1083,7 +1143,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             }
             meta::Set::NexusFrameCapacity(value) => self.memory.configuration.nexus_frame_capacity = Some(value.clone()),
             meta::Set::NexusTransportTimeout(value) => self.memory.configuration.nexus_transport_timeout = Some(value.clone()),
-            _ if setting_owner(&set) == meta::Owner::Translator => {
+            _ if setting_owner(&set) == meta::Keeper::Translator => {
                 let name = setting_name(&set);
                 self.memory.configuration.translator_sets.retain(|current| setting_name(current) != name);
                 self.memory.configuration.translator_sets.push(set.clone());
@@ -1095,10 +1155,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             self.memory.configuration = previous;
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
         }
-        let owner = setting_owner(&set);
+        let keeper = setting_owner(&set);
         meta::Response::Configured(meta::ConfiguredState {
             set,
-            owner,
+            keeper,
             configuration_revision: self.memory.configuration.revision.clone(),
             readiness: self.memory.configuration.readiness(),
         })
@@ -1186,7 +1246,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.prune_events();
     }
 
-    pub fn subscriber_owner(&self, id: i64) -> Option<&translator::Caller> {
+    pub fn subscriber_owner(&self, id: i64) -> Option<&wire::Owner> {
         Some(&self.subscribers.get(&id)?.owner)
     }
 
@@ -1200,20 +1260,20 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.events.retain(|event| event.sequence > after);
     }
 
-    fn register(&mut self, owner: translator::Caller, repository: wire::Repository) -> wire::Response {
+    fn register(&mut self, owner: wire::Owner, caller: translator::Caller, repository: wire::Repository) -> wire::Response {
         if self
             .memory
             .repositories
             .iter()
             .any(|stored| !same_owner(&stored.owner, &owner))
         {
-            return wire::Response::Refused(wire::Refusal::NotAuthorized(owner));
+            return wire::Response::Refused(wire::Refusal::NotAuthorized(caller));
         }
         if self
             .repository(&repository)
             .is_some_and(|stored| !same_owner(&stored.owner, &owner))
         {
-            return wire::Response::Refused(wire::Refusal::NotAuthorized(owner));
+            return wire::Response::Refused(wire::Refusal::NotAuthorized(caller));
         }
         let first = match self.emit_effect(emission::Query::Snapshot(repository.clone()))
         {
@@ -1247,7 +1307,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
 
     fn install_repository(
         &mut self,
-        owner: translator::Caller,
+        owner: wire::Owner,
         snapshot: emission::SourceSnapshot,
     ) -> Result<(), ()> {
         let previous = self.memory.clone();
@@ -1268,12 +1328,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         Ok(())
     }
 
-    fn furnish(&mut self, owner: translator::Caller, request: wire::FurnishRequest) -> wire::Response {
+    fn furnish(&mut self, owner: wire::Owner, caller: translator::Caller, request: wire::FurnishRequest) -> wire::Response {
         if self
             .workspace(&request.workspace)
             .is_some_and(|stored| !same_owner(&stored.owner, &owner))
         {
-            return wire::Response::Refused(wire::Refusal::NotAuthorized(owner));
+            return wire::Response::Refused(wire::Refusal::NotAuthorized(caller));
         }
         if self
             .workspace(&request.workspace)
@@ -1607,7 +1667,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             let Some(stored) = self.workspace(&workspace).cloned() else {
                 continue;
             };
-            match self.furnish(stored.owner, stored.request) {
+            match self.furnish(stored.owner, translator::Caller { user_id: translator::UserId(0), process_id: translator::ProcessId(0) }, stored.request) {
                 wire::Response::Furnished(furnished) => {
                     self.event(wire::Response::Changed(wire::Change {
                         repository: repository.clone(),
@@ -1629,7 +1689,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
     }
 
-    pub fn subscribe(&mut self, owner: translator::Caller) -> Result<Subscription, wire::Refusal> {
+    pub fn subscribe(&mut self, owner: wire::Owner) -> Result<Subscription, wire::Refusal> {
         let capacity = self.memory.configuration.subscriber_capacity.unwrap_or(0);
         if self.subscribers.len() as i64 >= capacity {
             return Err(wire::Refusal::SubscriberCapacityReached(capacity));
@@ -1772,20 +1832,20 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.store.store(&self.memory)
     }
 
-    fn authorized_ordinary(&self, caller: &translator::Caller) -> bool {
-        self.memory
-            .configuration
-            .ordinary_peers
-            .as_ref()
-            .is_some_and(|peers| peer_allowed(peers, caller))
+    pub fn direct_owner(&self, caller: &translator::Caller) -> Option<wire::Owner> {
+        self.memory.configuration.ordinary_peers.as_ref().and_then(|peers| peer_owner(peers, caller))
     }
 
-    fn authorized_meta(&self, caller: &translator::Caller) -> bool {
-        self.memory
-            .configuration
-            .meta_peers
-            .as_ref()
-            .is_some_and(|peers| peer_allowed(peers, caller))
+    pub fn login_owner(&self, caller: &translator::Caller) -> Option<wire::Owner> {
+        let owner = wire::Owner::Login(caller.user_id.clone());
+        self.owner_allowed(&owner).then_some(owner)
+    }
+
+    fn owner_allowed(&self, owner: &wire::Owner) -> bool {
+        match owner {
+            wire::Owner::Login(_) => owner == &self.memory.owner,
+            wire::Owner::Peer(peer_id) => self.memory.configuration.ordinary_peers.as_ref().is_some_and(|peers| peers.0.iter().any(|peer| &peer.peer_id == peer_id)),
+        }
     }
 
     fn repository(&self, repository: &wire::Repository) -> Option<&StoredRepository> {

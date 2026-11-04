@@ -70,7 +70,7 @@ pub enum RecoveryOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicationContext {
-    pub owner: translator::Caller,
+    pub owner: wire::Owner,
     pub configuration_revision: meta::ConfigurationRevision,
     pub layout: meta::Layout,
     pub retention_policy: meta::RetentionPolicy,
@@ -79,7 +79,7 @@ pub struct PublicationContext {
 /// The complete intent that Memory must durably store before Publish is emitted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingIntent {
-    pub owner: translator::Caller,
+    pub owner: wire::Owner,
     pub harness: wire::Harness,
     pub configuration_revision: meta::ConfigurationRevision,
     pub requested: Vec<wire::ModuleName>,
@@ -946,10 +946,7 @@ mod tests {
 
     fn publication_context() -> PublicationContext {
         PublicationContext {
-            owner: translator::Caller {
-                user_id: translator::UserId(1000),
-                process_id: translator::ProcessId(42),
-            },
+            owner: wire::Owner::Login(translator::UserId(1000)),
             configuration_revision: meta::ConfigurationRevision(3),
             layout: layout(),
             retention_policy: meta::RetentionPolicy::KeepAll,

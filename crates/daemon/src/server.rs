@@ -180,9 +180,17 @@ fn serve_ordinary(
     let call = Signal::<wire::Call>::from(Vec::<u8>::from(body))
         .restore()
         .map_err(restore_error)?;
-    admit_ordinary_call(&stream, paired, &call.caller)?;
+    let paired_transport = admit_ordinary_call(&stream, paired, &call.caller)?;
+    let owner = {
+        let daemon = daemon.lock().map_err(lock_error)?;
+        if paired_transport { daemon.login_owner(&call.caller) } else { daemon.direct_owner(&call.caller) }
+    };
+    let Some(owner) = owner else {
+        let response = wire::Response::Refused(wire::Refusal::NotAuthorized(call.caller));
+        return write_signal(&mut stream, &response, capacity);
+    };
     if matches!(call.query, wire::Query::Subscribe) {
-        let subscription = daemon.lock().map_err(lock_error)?.open_subscription(call);
+        let subscription = daemon.lock().map_err(lock_error)?.open_subscription_as(call, owner);
         match subscription {
             Ok(subscription) => {
                 write_subscription(&mut stream, &subscription.initial.response, admission)?;
@@ -213,7 +221,7 @@ fn serve_ordinary(
             Err(response) => return write_signal(&mut stream, &response, capacity),
         }
     }
-    let response = daemon.lock().map_err(lock_error)?.handle(call);
+    let response = daemon.lock().map_err(lock_error)?.handle_as(call, owner);
     write_signal(&mut stream, &response, capacity)
 }
 
@@ -268,13 +276,13 @@ fn admit(stream: &UnixStream, paired: &meta::PairedTranslator) -> io::Result<()>
     }
 }
 
-fn admit_ordinary_call(stream: &UnixStream, paired: &meta::PairedTranslator, caller: &translator::Caller) -> io::Result<()> {
+fn admit_ordinary_call(stream: &UnixStream, paired: &meta::PairedTranslator, caller: &translator::Caller) -> io::Result<bool> {
     let credentials = translator::unix::peer_credentials(stream).map_err(io::Error::other)?;
     let paired_transport = credentials.user_id == paired.user_id
         && credentials.group_id == paired.group_id
         && credentials.process_id == paired.process_id;
     if paired_transport || (credentials.user_id == caller.user_id && credentials.process_id == caller.process_id) {
-        Ok(())
+        Ok(paired_transport)
     } else {
         Err(io::Error::new(io::ErrorKind::PermissionDenied, "declared caller does not match live peer"))
     }
@@ -405,7 +413,7 @@ mod tests {
                 group_id: translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
                 process_id: caller.process_id.clone(),
             },
-            bootstrap_owner: meta::BootstrapOwner(identity.clone()),
+            bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(caller.user_id.clone())),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let running = Arc::clone(&stop);

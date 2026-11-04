@@ -25,12 +25,35 @@
           doCheck = false;
         };
       in {
-        packages = {
-          default = buildBinary "belief-nexus-daemon" "belief-nexus-daemon";
+        packages = rec {
           nexus = buildBinary "belief-nexus-daemon" "belief-nexus-daemon";
           translator = buildBinary "belief-nexus-translator" "belief-translator";
-          cli = buildBinary "belief-nexus-translator" "belief-nexus";
-          meta-cli = buildBinary "belief-nexus-translator" "belief-nexus-meta";
+          internal = rust.craneLib.buildPackage {
+            pname = "belief-nexus-internal"; version = "0.1.0"; src = source; inherit cargoArtifacts;
+            cargoExtraArgs = "-p belief-nexus-translator --bin belief-nexus --bin belief-nexus-meta --bin belief-pair --all-features";
+            doCheck = false;
+            postInstall = ''
+              mkdir -p "$out/libexec"
+              for executable in belief-nexus belief-nexus-meta belief-pair; do
+                mv "$out/bin/$executable" "$out/libexec/$executable"
+              done
+              rmdir "$out/bin"
+            '';
+          };
+          pair = pkgs.writeShellScriptBin "belief-pair" ''
+            if [[ $# -ne 1 ]]; then echo "usage: belief-pair '<Place>'" >&2; exit 64; fi
+            exec ${internal}/libexec/belief-pair "$1" \
+              "{ «${nexus}/bin/belief-nexus-daemon» «${translator}/bin/belief-translator» belief.sock belief-meta.sock belief-translator.sock belief-meta-translator.sock belief.memory { 8388608 70000 } Login.$(${pkgs.coreutils}/bin/id -u) [ RepositoryPolling.100 SubscriberCapacity.64 OrdinaryPeers.[] MetaPeers.[] Layout.{ Codex { .belief generations current .codex/config.toml model_instructions_file instructions.md .agents/skills } } Layout.{ Claude { .belief generations current CLAUDE.md unused-for-claude CLAUDE.md .claude/skills } } Placement.{ Spirit SystemPrompt } Placement.{ Intent SystemPrompt } Placement.{ Vision Skills } Placement.{ Knowledge Skills } Placement.{ Role Skills } GenerationRetention.KeepAll NexusFrameCapacity.8388608 NexusTransportTimeout.70000 CallTimeout.70000 OutputLimit.8388608 TextBudget.{ 100000 100 } TranslatorFrameCapacity.8388608 TranslatorTransportTimeout.70000 GitExecutable.«${pkgs.git}/bin/git» ] }"
+          '';
+          cli = pkgs.writeShellScriptBin "belief-nexus" ''
+            if [[ $# -ne 2 ]]; then echo "usage: belief-nexus <metaflow> '<datom>'" >&2; exit 64; fi
+            exec ${internal}/libexec/belief-nexus "$1" "$2" belief-translator.sock
+          '';
+          meta-cli = pkgs.writeShellScriptBin "belief-nexus-meta" ''
+            if [[ $# -ne 2 ]]; then echo "usage: belief-nexus-meta <metaflow> '<datom>'" >&2; exit 64; fi
+            exec ${internal}/libexec/belief-nexus-meta "$1" "$2" belief-meta-translator.sock
+          '';
+          default = pkgs.symlinkJoin { name = "belief-nexus-v1"; paths = [ nexus translator pair cli meta-cli ]; };
         };
         checks = {
           test = rust.craneLib.cargoTest {

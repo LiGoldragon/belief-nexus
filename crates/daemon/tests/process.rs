@@ -28,12 +28,24 @@ fn direct_peer_child() {
         let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller: caller.clone(), query: wire::Query::Register(repository) });
         assert!(matches!(response, wire::Response::Registered(_)), "configured direct Register failed: {response:?}");
         let workspace = wire::Workspace(wire::WorkspacePath(std::env::var("BELIEF_DIRECT_WORKSPACE").unwrap()));
-        let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller, query: wire::Query::Furnish(wire::FurnishRequest {
+        let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller: caller.clone(), query: wire::Query::Furnish(wire::FurnishRequest {
             workspace: workspace.clone(), harness: wire::Harness::Codex,
             module_name_vector: vec![wire::ModuleName { kind: wire::Kind::Spirit, subject: wire::Subject("core".into()) }],
         }) });
         let wire::Response::Furnished(furnished) = response else { panic!("configured direct Furnish failed: {response:?}") };
         assert_eq!(furnished.workspace, workspace);
+        assert!(Path::new(&(furnished.furnished_paths.system_prompt_path.0)).exists());
+        assert!(Path::new(&(furnished.furnished_paths.skills_path.0)).exists());
+        let claude_workspace = wire::Workspace(wire::WorkspacePath(std::env::var("BELIEF_DIRECT_CLAUDE_WORKSPACE").unwrap()));
+        let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller, query: wire::Query::Furnish(wire::FurnishRequest {
+            workspace: claude_workspace.clone(), harness: wire::Harness::Claude,
+            module_name_vector: vec![
+                wire::ModuleName { kind: wire::Kind::Spirit, subject: wire::Subject("core".into()) },
+                wire::ModuleName { kind: wire::Kind::Knowledge, subject: wire::Subject("witness".into()) },
+            ],
+        }) });
+        let wire::Response::Furnished(furnished) = response else { panic!("configured direct Claude Furnish failed: {response:?}") };
+        assert_eq!(furnished.workspace, claude_workspace);
         assert!(Path::new(&(furnished.furnished_paths.system_prompt_path.0)).exists());
         assert!(Path::new(&(furnished.furnished_paths.skills_path.0)).exists());
     } else {
@@ -115,7 +127,7 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
             group_id: translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
             process_id: caller.process_id.clone(),
         },
-        bootstrap_owner: meta::BootstrapOwner(identity.clone()),
+        bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(caller.user_id.clone())),
     };
     let mut child = Command::new(env!("CARGO_BIN_EXE_belief-nexus-daemon"))
         .stdin(Stdio::piped())
@@ -140,9 +152,13 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
     }
     let repository = directory.path().join("beliefs");
     let workspace = directory.path().join("workspace");
+    let claude_workspace = directory.path().join("claude-workspace");
     std::fs::create_dir_all(repository.join("spirit")).unwrap();
+    std::fs::create_dir_all(repository.join("knowledge")).unwrap();
     std::fs::create_dir_all(&workspace).unwrap();
-    std::fs::write(repository.join("spirit/core.md"), "direct furnish witness\n").unwrap();
+    std::fs::create_dir_all(&claude_workspace).unwrap();
+    std::fs::write(repository.join("spirit/core.md"), "The exact Claude bundle witness is CLAUDE_BUNDLE_WITNESS.\n").unwrap();
+    std::fs::write(repository.join("knowledge/witness.md"), "---\nname: knowledge-witness\ndescription: Use for the Belief Nexus Claude proof.\n---\nState the exact skill witness CLAUDE_SKILL_WITNESS.\n").unwrap();
     for args in [["init", "-b", "main"].as_slice(), ["config", "user.email", "belief@example.test"].as_slice(), ["config", "user.name", "Belief Test"].as_slice(), ["add", "."].as_slice(), ["commit", "-m", "fixture"].as_slice()] {
         assert!(Command::new("git").arg("-C").arg(&repository).args(args).status().unwrap().success());
     }
@@ -155,6 +171,7 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
         .env("BELIEF_DIRECT_PEER_AUTHORIZED", "1")
         .env("BELIEF_DIRECT_REPOSITORY", &repository)
         .env("BELIEF_DIRECT_WORKSPACE", &workspace)
+        .env("BELIEF_DIRECT_CLAUDE_WORKSPACE", &claude_workspace)
         .spawn().unwrap();
     let binding = translator::PeerBinding {
         peer_id: translator::PeerId("flow-peer".into()),
@@ -173,7 +190,14 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
         meta::Set::RepositoryPolling(meta::Timeout(20)), meta::Set::SubscriberCapacity(2),
         meta::Set::OrdinaryPeers(wire::PeerList(vec![binding])), meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
         meta::Set::Layout(meta::HarnessLayout { harness: wire::Harness::Codex, layout }),
+        meta::Set::Layout(meta::HarnessLayout { harness: wire::Harness::Claude, layout: meta::Layout {
+            owned_root: meta::OwnedRoot(wire::RelativePath(".belief".into())), generations_directory: meta::GenerationsDirectory(wire::RelativePath("generations".into())),
+            current_link: meta::CurrentLink(wire::RelativePath("current".into())), settings_file: meta::SettingsFile(wire::RelativePath("CLAUDE.md".into())),
+            instructions_setting: meta::InstructionsSetting("unused-for-claude".into()), instructions_file: meta::InstructionsFile(wire::RelativePath("CLAUDE.md".into())),
+            skills_directory: meta::SkillsDirectory(wire::RelativePath(".claude/skills".into())),
+        } }),
         meta::Set::Placement(meta::PlacementDefault { kind: wire::Kind::Spirit, placement: wire::Placement::SystemPrompt }),
+        meta::Set::Placement(meta::PlacementDefault { kind: wire::Kind::Knowledge, placement: wire::Placement::Skills }),
         meta::Set::NexusFrameCapacity(meta::ByteLimit(1_000_000)), meta::Set::NexusTransportTimeout(meta::Timeout(1_000)),
         meta::Set::NexusSocket(meta::SocketPath("unused".into())), meta::Set::MetaNexusSocket(meta::SocketPath("unused-meta".into())),
         meta::Set::CallTimeout(meta::Timeout(1_000)), meta::Set::OutputLimit(meta::ByteLimit(1_000_000)),
@@ -187,6 +211,17 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
     }
     std::fs::write(&authorized_gate, b"go").unwrap();
     assert!(authorized.wait().unwrap().success(), "configured direct peer process failed");
+    assert_eq!(std::fs::read_link(claude_workspace.join("CLAUDE.md")).unwrap(), claude_workspace.join(".belief/current/CLAUDE.md"));
+    assert_eq!(std::fs::read_link(claude_workspace.join(".claude/skills")).unwrap(), claude_workspace.join(".belief/current/skills"));
+    if let Some(claude) = std::env::var_os("BELIEF_LIVE_CLAUDE") {
+        let output = Command::new(claude).current_dir(&claude_workspace)
+            .args(["--print", "--dangerously-skip-permissions", "State the exact bundle witness. Invoke $knowledge-witness and state its exact skill witness."])
+            .output().unwrap();
+        assert!(output.status.success(), "Claude failed: {}", String::from_utf8_lossy(&output.stderr));
+        let witness = String::from_utf8(output.stdout).unwrap();
+        assert!(witness.contains("CLAUDE_BUNDLE_WITNESS"), "Claude omitted bundle witness: {witness}");
+        assert!(witness.contains("CLAUDE_SKILL_WITNESS"), "Claude omitted skill witness: {witness}");
+    }
 
     let refused_gate = directory.path().join("refused.gate");
     let mut refused = Command::new(&current)
