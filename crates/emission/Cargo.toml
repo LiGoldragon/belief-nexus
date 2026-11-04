@@ -19,3 +19,7 @@ rkyv = { version = "0.8", default-features = false, features = ["std", "bytechec
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }
 signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "8477b11ac97f21e58a3660457ad4d9c89918767f", default-features = false }
 meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "8f4c34ccef4f103352edd3d54e22eb4c19589d3c", default-features = false }
+toml_edit = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
