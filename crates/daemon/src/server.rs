@@ -182,7 +182,7 @@ fn serve_ordinary(
         let subscription = daemon.lock().map_err(lock_error)?.open_subscription(call);
         match subscription {
             Ok(subscription) => {
-                write_signal(&mut stream, &subscription.initial.response, capacity)?;
+                write_subscription(&mut stream, &subscription.initial.response, admission)?;
                 let result = 'subscription: loop {
                     if stop.load(Ordering::Acquire) {
                         break Ok(());
@@ -193,7 +193,9 @@ fn serve_ordinary(
                         .drain(subscription.id)
                         .unwrap_or_default();
                     for event in events {
-                        if let Err(error) = write_signal(&mut stream, &event.response, capacity) {
+                        if let Err(error) =
+                            write_subscription(&mut stream, &event.response, admission)
+                        {
                             break 'subscription Err(error);
                         }
                     }
@@ -281,6 +283,26 @@ fn write_signal<T: Signalizable>(
         .map_err(|error| io::Error::other(format!("signal: {error:?}")))?;
     stream
         .write_frame(&FrameBody::from(signal.bytes().to_vec()), capacity)
+        .map_err(frame_error)
+}
+fn write_subscription(
+    stream: &mut UnixStream,
+    response: &wire::Response,
+    admission: &meta::Admission,
+) -> io::Result<()> {
+    let archived = response
+        .signalize()
+        .map_err(|error| io::Error::other(format!("signal: {error:?}")))?;
+    if archived.bytes().len() > admission.byte_limit.0 as usize {
+        let terminal = wire::Response::SubscriptionClosed(wire::CloseReason::QueueOverflow);
+        let _ = write_signal(stream, &terminal, capacity(admission));
+        return Err(io::Error::other("subscription queue overflow"));
+    }
+    stream
+        .write_frame(
+            &FrameBody::from(archived.bytes().to_vec()),
+            capacity(admission),
+        )
         .map_err(frame_error)
 }
 fn bind_new(path: &Path) -> io::Result<UnixListener> {
