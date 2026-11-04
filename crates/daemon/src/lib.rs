@@ -543,6 +543,56 @@ mod tests {
         daemon.unsubscribe(first.id);
         assert!(daemon.subscribe(caller()).is_ok());
     }
+
+    #[test]
+    fn changed_watch_announces_observation_then_retry_publication_without_new_commit() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let memory = FakeMemory {
+            image: Some(ready_memory()),
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call {
+                caller: caller(),
+                query: wire::Query::Furnish(furnish_request()),
+            }),
+            wire::Response::Furnished(_)
+        ));
+        daemon
+            .effects
+            .replies
+            .push_back(emission::Response::Snapshotted(snapshot("two", "two")));
+        let events = daemon.poll_once();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0].response,
+            wire::Response::Changed(wire::Change {
+                furnished_workspace_vector,
+                ..
+            }) if furnished_workspace_vector.is_empty()
+        ));
+        assert!(matches!(
+            &events[1].response,
+            wire::Response::Changed(wire::Change {
+                furnished_workspace_vector,
+                ..
+            }) if furnished_workspace_vector.len() == 1
+        ));
+        assert_eq!(
+            daemon.memory.repositories[0].snapshot.source_revision,
+            wire::SourceRevision("two".into())
+        );
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
