@@ -87,6 +87,7 @@ pub struct Publication {
     pub repository_states: RepositoryStates,
     pub found_modules: FoundModules,
     pub missing_modules: MissingModules,
+    pub retention_policy: meta_signal_belief_nexus::RetentionPolicy,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -117,6 +118,30 @@ pub struct PublicationInspection {
     pub workspace: signal_belief_nexus::Workspace,
     pub owned_pointer_option: std::option::Option<OwnedPointer>,
     pub publication_manifest_option: std::option::Option<PublicationManifest>,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct ProtectedGenerations(pub std::vec::Vec<signal_belief_nexus::GenerationId>);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct RemovedGenerations(pub std::vec::Vec<signal_belief_nexus::GenerationId>);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct CleanupRequest {
+    pub workspace: signal_belief_nexus::Workspace,
+    pub layout: meta_signal_belief_nexus::Layout,
+    pub retention_policy: meta_signal_belief_nexus::RetentionPolicy,
+    pub protected_generations: ProtectedGenerations,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct CleanupState {
+    pub workspace: signal_belief_nexus::Workspace,
+    pub removed_generations: RemovedGenerations,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -210,6 +235,21 @@ pub struct PublicationRefusal {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum CleanupOperation {
+    InspectingGenerations,
+    RemovingGeneration,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct CleanupRefusal {
+    pub workspace: signal_belief_nexus::Workspace,
+    pub cleanup_operation: CleanupOperation,
+    pub publication_evidence: PublicationEvidence,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum EmissionRefusal {
     Source(SourceRefusal),
     Publication(PublicationRefusal),
@@ -221,6 +261,7 @@ pub enum Query {
     Snapshot(signal_belief_nexus::Repository),
     Publish(Publication),
     InspectPublication(InspectionRequest),
+    Clean(CleanupRequest),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -229,9 +270,10 @@ pub enum Response {
     Snapshotted(SourceSnapshot),
     Published(PublicationState),
     Inspected(PublicationInspection),
+    Cleaned(CleanupState),
+    CleanupRefused(CleanupRefusal),
     EmissionRefused(EmissionRefusal),
 }
-
 /// The authored schema whose digest identifies this internal effect contract.
 pub const ETHOS: &str = include_str!("../../../emission.ethos");
 
@@ -249,21 +291,19 @@ use std::process::Command;
 
 /// The process-side implementation of Belief's external effects.
 ///
-/// The executable and retention count are supplied configuration. The Nexus
-/// sends only typed `Query` values and never observes command lines or paths
+/// The executable is supplied configuration. Each publication carries the
+/// coherent retention policy selected by the Nexus. The Nexus sends only
+/// typed `Query` values and never observes command lines or paths
 /// that have not passed through this boundary.
 #[derive(Clone, Debug)]
 pub struct FileEmission {
     git_executable: PathBuf,
-    retained_generations: usize,
 }
 
 impl FileEmission {
-    pub fn new(git_executable: PathBuf, retained_generations: usize) -> Result<Self, String> {
-        if retained_generations == 0 {
-            return Err("retained_generations must be positive".into());
-        }
-        Ok(Self { git_executable, retained_generations })
+    pub fn new(git_executable: PathBuf) -> Result<Self, String> {
+        if git_executable.as_os_str().is_empty() { return Err("git executable must be named".into()); }
+        Ok(Self { git_executable })
     }
 
     pub fn execute(&self, query: Query) -> Response {
@@ -271,6 +311,7 @@ impl FileEmission {
             Query::Snapshot(repository) => self.snapshot(repository),
             Query::Publish(publication) => self.publish(publication),
             Query::InspectPublication(request) => self.inspect(request),
+            Query::Clean(request) => self.clean(request),
         }
     }
 
@@ -446,8 +487,6 @@ impl FileEmission {
 
         paths.replace_current(publication, &generation)
             .map_err(|evidence| publication_refusal(publication, PublicationOperation::ReplacingPointer, evidence))?;
-        paths.retain(self.retained_generations, &publication.generation_id);
-
         Ok(PublicationState {
             workspace: publication.workspace.clone(),
             generation_id: publication.generation_id.clone(),
@@ -476,6 +515,24 @@ impl FileEmission {
                 publication_operation: PublicationOperation::InspectingManifest,
                 publication_evidence: evidence,
             })),
+        }
+    }
+
+    fn clean(&self, request: CleanupRequest) -> Response {
+        let workspace = PathBuf::from(&((request.workspace.0).0));
+        let paths = match PublicationPaths::new(&workspace, &request.layout) {
+            Ok(paths) => paths,
+            Err(publication_evidence) => return Response::CleanupRefused(CleanupRefusal {
+                workspace: request.workspace, cleanup_operation: CleanupOperation::InspectingGenerations, publication_evidence,
+            }),
+        };
+        match paths.cleanup(&request.retention_policy, &request.protected_generations) {
+            Ok(removed_generation_vector) => Response::Cleaned(CleanupState {
+                workspace: request.workspace, removed_generations: RemovedGenerations(removed_generation_vector),
+            }),
+            Err((cleanup_operation, publication_evidence)) => Response::CleanupRefused(CleanupRefusal {
+                workspace: request.workspace, cleanup_operation, publication_evidence,
+            }),
         }
     }
 }
@@ -657,18 +714,39 @@ impl PublicationPaths {
         Ok((Some(pointer), Some(manifest)))
     }
 
-    fn retain(&self, retained: usize, current: &signal_belief_nexus::GenerationId) {
-        let Ok(entries) = fs::read_dir(&self.generations) else { return };
+    fn cleanup(
+        &self,
+        policy: &meta_signal_belief_nexus::RetentionPolicy,
+        protected: &ProtectedGenerations,
+    ) -> Result<Vec<signal_belief_nexus::GenerationId>, (CleanupOperation, PublicationEvidence)> {
+        let keep_previous = match policy {
+            meta_signal_belief_nexus::RetentionPolicy::KeepAll => return Ok(Vec::new()),
+            meta_signal_belief_nexus::RetentionPolicy::KeepPrevious(value) => usize::try_from(value.0)
+                .ok().filter(|value| *value > 0)
+                .ok_or((CleanupOperation::InspectingGenerations, PublicationEvidence::ManifestMismatch))?,
+        };
+        let entries = fs::read_dir(&self.generations)
+            .map_err(|error| (CleanupOperation::InspectingGenerations, io_evidence(&self.generations, error)))?;
         let mut generations = entries.flatten().filter_map(|entry| {
             let path = entry.path();
             if !entry.file_type().ok()?.is_dir() { return None; }
             let manifest = read_manifest(&path.join("manifest.signal")).ok()?;
-            Some((manifest.intended_publication.0.0, manifest.generation_id.0, path))
+            Some((manifest.intended_publication.0.0, manifest.generation_id, path))
         }).collect::<Vec<_>>();
         generations.sort_by(|a, b| b.0.cmp(&a.0));
-        let deletions = generations.into_iter().skip(retained).filter(|(_, id, _)| id != &current.0).map(|(_, _, path)| path).collect::<Vec<_>>();
+        let current = self.inspect_untrusted().map_err(|evidence| (CleanupOperation::InspectingGenerations, evidence))?.0
+            .map(|pointer| pointer.generation_id);
+        let retained = keep_previous.checked_add(1).unwrap_or(usize::MAX);
+        let deletions = generations.into_iter().skip(retained)
+            .filter(|(_, id, _)| current.as_ref() != Some(id) && !protected.0.contains(id))
+            .map(|(_, id, path)| (id, path)).collect::<Vec<_>>();
         // `deletions` is the complete checked listing before any deletion runs.
-        for path in deletions { let _ = fs::remove_dir_all(path); }
+        let mut removed = Vec::with_capacity(deletions.len());
+        for (generation, path) in deletions {
+            fs::remove_dir_all(&path).map_err(|error| (CleanupOperation::RemovingGeneration, io_evidence(&path, error)))?;
+            removed.push(generation);
+        }
+        Ok(removed)
     }
 }
 
@@ -810,6 +888,7 @@ mod tests {
             }]),
             found_modules: FoundModules(vec![ModuleName { kind: Kind::Vision, subject: Subject("nexus".into()) }]),
             missing_modules: MissingModules(vec![],),
+            retention_policy: meta_signal_belief_nexus::RetentionPolicy::KeepAll,
         }
     }
 
@@ -829,6 +908,7 @@ mod tests {
             repository_states: RepositoryStates(vec![]),
             found_modules: FoundModules(vec![]),
             missing_modules: MissingModules(vec![ModuleName { kind: Kind::Vision, subject: Subject("missing".into()) }]),
+            retention_policy: meta_signal_belief_nexus::RetentionPolicy::KeepAll,
         };
         let query = Query::Publish(publication);
         let archived = query.signalize().expect("archive emission");
@@ -866,7 +946,7 @@ mod tests {
         run_git(repository.path(), &["commit", "-m", "fixture"]);
         fs::write(repository.path().join("vision/nexus.md"), "working tree\n").unwrap();
 
-        let emission = FileEmission::new(PathBuf::from("git"), 2).unwrap();
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
         let response = emission.execute(Query::Snapshot(Repository(RepositoryPath(repository.path().to_string_lossy().into_owned()))));
         let Response::Snapshotted(snapshot) = response else { panic!("snapshot refused: {response:?}") };
         assert!(is_git_object_id(&snapshot.source_revision.0));
@@ -881,7 +961,7 @@ mod tests {
         fs::create_dir(workspace.path().join(".codex")).unwrap();
         fs::write(workspace.path().join(".codex/config.toml"), "model = \"gpt-test\"\n[sandbox]\nmode = \"strict\"\n").unwrap();
         fs::write(workspace.path().join("unrelated.txt"), "keep").unwrap();
-        let emission = FileEmission::new(PathBuf::from("git"), 2).unwrap();
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
         let first = publication(
             workspace.path(),
             "generation-one",
@@ -927,7 +1007,7 @@ mod tests {
 
     #[test]
     fn publication_refuses_unowned_skill_destination_and_owned_root_symlink() {
-        let emission = FileEmission::new(PathBuf::from("git"), 2).unwrap();
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
         let occupied = tempfile::tempdir().unwrap();
         fs::create_dir_all(occupied.path().join(".agents/skills")).unwrap();
         fs::write(occupied.path().join(".agents/skills/unrelated"), "keep").unwrap();

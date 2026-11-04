@@ -18,7 +18,7 @@ protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e7
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }
 signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "8477b11ac97f21e58a3660457ad4d9c89918767f", default-features = false }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "8f4c34ccef4f103352edd3d54e22eb4c19589d3c", default-features = false }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "5d83d92ca780d8a09979642d934d647faa10dd3f", default-features = false }
 toml_edit = "0.22"
 
 [dev-dependencies]

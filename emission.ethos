@@ -2,13 +2,16 @@
 Signal
 [ :signal_belief_nexus:[ ModuleName Repository RepositoryState Workspace RelativePath
                           SourceRevision PublicationRevision GenerationId Diagnostic ]
-  :meta_signal_belief_nexus:[ Layout ] ]              ; imports
+  :meta_signal_belief_nexus:[ Layout RetentionPolicy ] ] ; imports
 [ Snapshot.Repository                                 ; emissions: read one immutable main snapshot
   Publish.Publication                                 ;   or atomically replace one owned publication
-  InspectPublication.InspectionRequest ]              ;   or observe owned recovery evidence
+  InspectPublication.InspectionRequest                ;   or observe owned recovery evidence
+  Clean.CleanupRequest ]                              ;   or remove proven-owned superseded generations
 [ Snapshotted.SourceSnapshot                          ; outcomes
   Published.PublicationState
   Inspected.PublicationInspection
+  Cleaned.CleanupState
+  CleanupRefused.CleanupRefusal
   EmissionRefused.EmissionRefusal ]
 [ Content.String                                      ; types
   AbsolutePath.String
@@ -24,11 +27,15 @@ Signal
   PublicationManifest.{ GenerationId IntendedPublication RepositoryStates
                          FoundModules MissingModules }
   Publication.{ Workspace GenerationId PriorPublication IntendedPublication
-                 WorkspaceImage RepositoryStates FoundModules MissingModules }
+                 WorkspaceImage RepositoryStates FoundModules MissingModules RetentionPolicy }
   PublicationState.{ Workspace GenerationId PublicationRevision }
   InspectionRequest.{ Workspace Layout }
   OwnedPointer.{ GenerationId PublicationRevision }
   PublicationInspection.{ Workspace Option<OwnedPointer> Option<PublicationManifest> }
+  ProtectedGenerations.Vector<GenerationId>
+  RemovedGenerations.Vector<GenerationId>
+  CleanupRequest.{ Workspace Layout RetentionPolicy ProtectedGenerations }
+  CleanupState.{ Workspace RemovedGenerations }
   SourceOperation.[ ReadingMain ReadingTree ]
   PublicationOperation.[ StagingSettings StagingGeneration WritingManifest
                           ReplacingPointer InspectingPointer InspectingManifest ]
@@ -48,4 +55,6 @@ Signal
                          PermissionDenied
                          Translator.Diagnostic ]
   PublicationRefusal.{ Workspace PublicationOperation PublicationEvidence }
+  CleanupOperation.[ InspectingGenerations RemovingGeneration ]
+  CleanupRefusal.{ Workspace CleanupOperation PublicationEvidence }
   EmissionRefusal.[ Source.SourceRefusal Publication.PublicationRefusal ] ]
