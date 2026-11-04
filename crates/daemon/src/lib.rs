@@ -175,14 +175,6 @@ fn map_emission(refusal: emission::EmissionRefusal) -> wire::Refusal {
     }
 }
 
-fn cleanup_refusal(value: emission::CleanupRefusal) -> wire::Refusal {
-    wire::Refusal::File(wire::FileFailure {
-        workspace: value.workspace,
-        file_operation: wire::FileOperation::Inspecting,
-        file_evidence: wire::FileEvidence::PermissionDenied,
-    })
-}
-
 fn file_refusal(workspace: wire::Workspace) -> wire::Refusal {
     wire::Refusal::File(wire::FileFailure {
         workspace,
@@ -230,6 +222,7 @@ mod tests {
         replies: VecDeque<emission::Response>,
         calls: Vec<emission::Query>,
         publish_from_query: bool,
+        cleanup_failures: usize,
     }
 
     impl EmissionPort for FakeEffects {
@@ -246,10 +239,19 @@ mod tests {
                         publication_revision: publication.intended_publication.0,
                     })
                 }
+                emission::Query::Clean(request) if self.cleanup_failures > 0 => {
+                    self.cleanup_failures -= 1;
+                    emission::Response::CleanupRefused(wire::FileFailure {
+                        workspace: request.workspace,
+                        file_operation: wire::FileOperation::Cleaning,
+                        file_evidence: wire::FileEvidence::PermissionDenied,
+                    })
+                }
                 emission::Query::Clean(request) => {
                     emission::Response::Cleaned(emission::CleanupState {
                         workspace: request.workspace,
-                        removed_generations: emission::RemovedGenerations(Vec::new()),
+                        generation_id: request.generation_id,
+                        cleanup_outcome: emission::CleanupOutcome::Removed,
                     })
                 }
                 _ => panic!("missing effect reply"),
@@ -342,6 +344,7 @@ mod tests {
             },
             repositories: Vec::new(),
             workspaces: Vec::new(),
+            cleanup_maintenance: Vec::new(),
             next_event_sequence: 1,
         }
     }
@@ -587,6 +590,61 @@ mod tests {
             wire::SourceRevision("two".into())
         );
     }
+
+    #[test]
+    fn cleanup_failure_is_separate_and_retried_under_current_policy() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            cleanup_failures: 2,
+            ..Default::default()
+        };
+        let mut image = ready_memory();
+        image.configuration.retention =
+            meta::RetentionPolicy::KeepPrevious(meta::PositiveInteger(1));
+        let memory = FakeMemory {
+            image: Some(image),
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+        register(&mut daemon);
+        let response = daemon.handle(wire::Call {
+            caller: caller(),
+            query: wire::Query::Furnish(furnish_request()),
+        });
+        assert!(matches!(response, wire::Response::Furnished(_)));
+        let response = daemon.handle(wire::Call {
+            caller: caller(),
+            query: wire::Query::Furnish(furnish_request()),
+        });
+        assert!(matches!(response, wire::Response::Furnished(_)));
+        assert!(daemon.memory.workspaces[0].successful.is_some());
+        assert_eq!(daemon.memory.cleanup_maintenance.len(), 1);
+        assert!(daemon.memory.workspaces[0].pending.is_none());
+        assert!(daemon
+            .events
+            .iter()
+            .any(|event| matches!(event.response, wire::Response::CleanupFailed(_))));
+        assert!(matches!(
+            daemon.handle(wire::Call {
+                caller: caller(),
+                query: wire::Query::Furnish(furnish_request()),
+            }),
+            wire::Response::Refused(wire::Refusal::NotReady)
+        ));
+
+        daemon
+            .effects
+            .replies
+            .push_back(emission::Response::Snapshotted(snapshot("one", "one")));
+        daemon.poll_once();
+        assert!(daemon.memory.cleanup_maintenance.is_empty());
+        assert!(daemon.memory.workspaces[0].successful.is_some());
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -735,8 +793,22 @@ pub struct StoredWorkspace {
     pub layout: meta::Layout,
     pub retention: meta::RetentionPolicy,
     pub successful: Option<wire::FurnishedWorkspace>,
+    pub successful_history: Vec<SuccessfulGeneration>,
     pub successful_basis: Vec<wire::RepositoryState>,
     pub pending: Option<emission::Publication>,
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SuccessfulGeneration {
+    pub generation_id: wire::GenerationId,
+    pub publication_revision: wire::PublicationRevision,
+}
+
+#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CleanupMaintenance {
+    pub workspace: wire::Workspace,
+    pub generation_id: wire::GenerationId,
+    pub publication_revision: wire::PublicationRevision,
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -744,6 +816,7 @@ pub struct MemoryImage {
     pub configuration: Configuration,
     pub repositories: Vec<StoredRepository>,
     pub workspaces: Vec<StoredWorkspace>,
+    pub cleanup_maintenance: Vec<CleanupMaintenance>,
     pub next_event_sequence: i64,
 }
 
@@ -753,6 +826,7 @@ impl MemoryImage {
             configuration: Configuration::empty(),
             repositories: Vec::new(),
             workspaces: Vec::new(),
+            cleanup_maintenance: Vec::new(),
             next_event_sequence: 1,
         }
     }
@@ -973,6 +1047,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             }
         }
         self.retry_pending_events();
+        self.retry_cleanup_maintenance();
+        self.maintain_workspaces();
         self.events[offset..].to_vec()
     }
 
@@ -1077,6 +1153,28 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         {
             return wire::Response::Refused(wire::Refusal::NotAuthorized(owner));
         }
+        if self
+            .workspace(&request.workspace)
+            .is_some_and(|stored| stored.pending.is_some())
+        {
+            return wire::Response::Refused(wire::Refusal::NotReady);
+        }
+        if self
+            .memory
+            .cleanup_maintenance
+            .iter()
+            .any(|maintenance| maintenance.workspace == request.workspace)
+        {
+            self.retry_cleanup_workspace(&request.workspace);
+            if self
+                .memory
+                .cleanup_maintenance
+                .iter()
+                .any(|maintenance| maintenance.workspace == request.workspace)
+            {
+                return wire::Response::Refused(wire::Refusal::NotReady);
+            }
+        }
         let previous = self.memory.clone();
         let revision = self.memory.configuration.revision.clone();
         let layout = self.memory.configuration.layout.clone().expect("ready");
@@ -1112,6 +1210,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 layout,
                 retention,
                 successful: None,
+                successful_history: Vec::new(),
                 successful_basis: Vec::new(),
                 pending: Some(publication.clone()),
             });
@@ -1138,6 +1237,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 };
                 let before = self.workspace(&state.workspace).cloned();
                 if let Some(stored) = self.workspace_mut(&state.workspace) {
+                    if let Some(previous) = stored.successful.take() {
+                        stored.successful_history.push(SuccessfulGeneration {
+                            generation_id: previous.generation_id,
+                            publication_revision: previous.publication_revision,
+                        });
+                    }
                     stored.successful = Some(furnished.clone());
                     stored.successful_basis = stored
                         .pending
@@ -1168,7 +1273,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     self.event(answer.clone());
                     return answer;
                 }
-                self.clean_after_success(&furnished.workspace);
+                self.clean_after_success(&furnished);
                 wire::Response::Furnished(furnished)
             }
             emission::Response::EmissionRefused(refusal) => {
@@ -1178,36 +1283,106 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
     }
 
-    fn clean_after_success(&mut self, workspace: &wire::Workspace) {
-        let Some(stored) = self.workspace(workspace).cloned() else {
-            return;
-        };
-        if matches!(stored.retention, meta::RetentionPolicy::KeepAll) {
+    fn clean_after_success(&mut self, furnished: &wire::FurnishedWorkspace) {
+        if self
+            .workspace(&furnished.workspace)
+            .is_some_and(|stored| stored.pending.is_some())
+        {
             return;
         }
-        let protected = self
+        if self
+            .memory
+            .cleanup_maintenance
+            .iter()
+            .any(|maintenance| maintenance.workspace == furnished.workspace)
+        {
+            self.retry_cleanup_workspace(&furnished.workspace);
+            return;
+        }
+        let Some(target) = self
+            .cleanup_candidates(&furnished.workspace)
+            .first()
+            .cloned()
+        else {
+            return;
+        };
+        let maintenance = CleanupMaintenance {
+            workspace: furnished.workspace.clone(),
+            generation_id: target.generation_id,
+            publication_revision: furnished.publication_revision.clone(),
+        };
+        self.memory.cleanup_maintenance.push(maintenance.clone());
+        if self.persist().is_err() {
+            self.memory
+                .cleanup_maintenance
+                .retain(|value| value != &maintenance);
+            return;
+        }
+        self.run_cleanup(maintenance);
+    }
+
+    fn cleanup_candidates(&self, workspace: &wire::Workspace) -> Vec<SuccessfulGeneration> {
+        let Some(stored) = self.workspace(workspace) else {
+            return Vec::new();
+        };
+        let keep = match self.memory.configuration.retention {
+            meta::RetentionPolicy::KeepAll => return Vec::new(),
+            meta::RetentionPolicy::KeepPrevious(ref value) => value.0.max(1) as usize,
+        };
+        let total = stored.successful_history.len() + usize::from(stored.successful.is_some());
+        let removable = total.saturating_sub(keep);
+        let protected: Vec<_> = self
             .memory
             .workspaces
             .iter()
             .filter_map(|record| record.pending.as_ref())
-            .map(|pending| pending.generation_id.clone())
+            .map(|pending| &pending.generation_id)
             .collect();
-        let request = emission::CleanupRequest {
-            workspace: workspace.clone(),
-            layout: stored.layout,
-            retention_policy: stored.retention,
-            protected_generations: emission::ProtectedGenerations(protected),
+        stored
+            .successful_history
+            .iter()
+            .take(removable)
+            .filter(|generation| !protected.contains(&&generation.generation_id))
+            .cloned()
+            .collect()
+    }
+
+    fn run_cleanup(&mut self, maintenance: CleanupMaintenance) {
+        let Some(stored) = self.workspace(&maintenance.workspace).cloned() else {
+            return;
         };
-        if let emission::Response::CleanupRefused(refusal) =
-            self.effects.emit(emission::Query::Clean(request))
-        {
-            // Cleanup is separate evidence. The successful publication remains true.
-            self.event(wire::Response::RefurnishFailed(wire::RefurnishFailure {
-                workspace: workspace.clone(),
-                repository: wire::Repository(wire::RepositoryPath(String::new())),
-                source_revision: wire::SourceRevision(String::new()),
-                refusal: cleanup_refusal(refusal),
-            }));
+        let request = emission::CleanupRequest {
+            workspace: maintenance.workspace.clone(),
+            generation_id: maintenance.generation_id.clone(),
+            layout: stored.layout,
+        };
+        match self.effects.emit(emission::Query::Clean(request)) {
+            emission::Response::Cleaned(state)
+                if state.workspace == maintenance.workspace
+                    && state.generation_id == maintenance.generation_id =>
+            {
+                let previous = self.memory.clone();
+                if let Some(stored) = self.workspace_mut(&maintenance.workspace) {
+                    stored
+                        .successful_history
+                        .retain(|generation| generation.generation_id != maintenance.generation_id);
+                }
+                self.memory
+                    .cleanup_maintenance
+                    .retain(|value| value != &maintenance);
+                if self.persist().is_err() {
+                    self.memory = previous;
+                }
+            }
+            emission::Response::CleanupRefused(file_failure) => {
+                self.event(wire::Response::CleanupFailed(wire::CleanupFailure {
+                    workspace: maintenance.workspace,
+                    generation_id: maintenance.generation_id,
+                    publication_revision: maintenance.publication_revision,
+                    file_failure,
+                }));
+            }
+            _ => {}
         }
     }
 
@@ -1225,6 +1400,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     Ok(RecoveryOutcome::Finalized(furnished)) => {
                         let previous = self.memory.clone();
                         if let Some(record) = self.workspace_mut(workspace) {
+                            if let Some(previous) = record.successful.take() {
+                                record.successful_history.push(SuccessfulGeneration {
+                                    generation_id: previous.generation_id,
+                                    publication_revision: previous.publication_revision,
+                                });
+                            }
                             record.successful = Some(furnished.clone());
                             record.successful_basis = record
                                 .pending
@@ -1250,10 +1431,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                                 },
                             ));
                         }
-                        self.clean_after_success(workspace);
+                        self.clean_after_success(&furnished);
                         Some(wire::Response::Furnished(furnished))
                     }
-                    Ok(RecoveryOutcome::Retry) => Some(self.furnish(stored.owner, stored.request)),
+                    Ok(RecoveryOutcome::Retry) => {
+                        stored.pending.map(|pending| self.publish(pending))
+                    }
                     Err(_) => Some(wire::Response::Refused(file_refusal(workspace.clone()))),
                 }
             }
@@ -1397,6 +1580,64 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     }
                     (response, _) => self.event(response),
                 }
+            }
+        }
+    }
+
+    fn retry_cleanup_maintenance(&mut self) {
+        let workspaces: Vec<_> = self
+            .memory
+            .cleanup_maintenance
+            .iter()
+            .map(|maintenance| maintenance.workspace.clone())
+            .collect();
+        for workspace in workspaces {
+            self.retry_cleanup_workspace(&workspace);
+        }
+    }
+
+    fn maintain_workspaces(&mut self) {
+        let furnished: Vec<_> = self
+            .memory
+            .workspaces
+            .iter()
+            .filter(|record| record.pending.is_none())
+            .filter_map(|record| record.successful.clone())
+            .collect();
+        for workspace in furnished {
+            self.clean_after_success(&workspace);
+        }
+    }
+
+    fn retry_cleanup_workspace(&mut self, workspace: &wire::Workspace) {
+        if self
+            .workspace(workspace)
+            .is_some_and(|record| record.pending.is_some())
+        {
+            return;
+        }
+        let Some(maintenance) = self
+            .memory
+            .cleanup_maintenance
+            .iter()
+            .find(|maintenance| &maintenance.workspace == workspace)
+            .cloned()
+        else {
+            return;
+        };
+        let eligible = self
+            .cleanup_candidates(workspace)
+            .iter()
+            .any(|candidate| candidate.generation_id == maintenance.generation_id);
+        if eligible {
+            self.run_cleanup(maintenance);
+        } else {
+            let previous = self.memory.clone();
+            self.memory
+                .cleanup_maintenance
+                .retain(|value| value != &maintenance);
+            if self.persist().is_err() {
+                self.memory = previous;
             }
         }
     }
