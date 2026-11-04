@@ -577,4 +577,23 @@ mod tests {
         false_readiness.set_vector.pop();
         assert!(TranslatorConfiguration::from_snapshot(&false_readiness).is_err());
     }
+
+    #[test]
+    fn deployment_text_round_trips() {
+        let deployment = Deployment {
+            nexus_executable: NexusExecutable("/nexus".into()),
+            translator_executable: TranslatorExecutable("/translator".into()),
+            ordinary_socket_name: SocketName("belief.sock".into()),
+            meta_socket_name: SocketName("belief-meta.sock".into()),
+            ordinary_translator_socket_name: SocketName("belief-translator.sock".into()),
+            meta_translator_socket_name: SocketName("belief-meta-translator.sock".into()),
+            memory_file_name: MemoryFileName("belief.memory".into()),
+            admission: meta::Admission { byte_limit: meta::ByteLimit(8_388_608), timeout: meta::Timeout(70_000) },
+            owner: public::Owner::Login(shared_translator::UserId(1000)),
+            set_vector: vec![],
+        };
+        let text = shared_translator::encode(&deployment);
+        eprintln!("deployment datom: {text}");
+        assert_eq!(deployment_from_text(&text).unwrap(), deployment);
+    }
 }

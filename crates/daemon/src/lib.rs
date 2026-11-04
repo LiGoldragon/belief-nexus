@@ -446,6 +446,11 @@ mod tests {
             configuration_revision_option: Some(current), set: meta::Set::RepositoryPolling(meta::Timeout(200)),
         }) });
         assert!(matches!(configured, meta::Response::Configured(_)));
+        let unconditional = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(1001) }, query: meta::Query::Configure(meta::ConfigureRequest {
+            configuration_revision_option: None, set: meta::Set::RepositoryPolling(meta::Timeout(250)),
+        }) });
+        let expected_revision = daemon.memory.configuration.revision.clone();
+        assert!(matches!(unconditional, meta::Response::Configured(meta::ConfiguredState { configuration_revision, .. }) if configuration_revision == expected_revision));
         let refused = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(2000), process_id: translator::ProcessId(999) }, query: meta::Query::Configure(meta::ConfigureRequest {
             configuration_revision_option: Some(daemon.memory.configuration.revision.clone()), set: meta::Set::RepositoryPolling(meta::Timeout(300)),
         }) });
@@ -1086,8 +1091,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             ));
         }
         let meta::Query::Configure(request) = call.query;
-        if request.configuration_revision_option.as_ref()
-            != Some(&self.memory.configuration.revision)
+        if request.configuration_revision_option.as_ref().is_some_and(|expected|
+            expected != &self.memory.configuration.revision)
         {
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::StaleRevision(
                 meta::StaleRevision {

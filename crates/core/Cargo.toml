@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 emission-belief-nexus = { path = "../emission" }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "a4547ef0d93d635b460559046514a4cf3c51e4f6" }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "257d34641381a3743d58df2c9437db672a92af91" }
 sha2 = "0.10"
 signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "ccfa452bf1b807c9f180a4cae70318e66afb9a11" }
 translator = { git = "https://github.com/LiGoldragon/translator", rev = "751c326f11c874b527a69ce6377ce9e196aeca37" }
