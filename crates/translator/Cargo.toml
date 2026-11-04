@@ -2,7 +2,19 @@
 name = "belief-nexus-translator"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 license = "MIT"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d90ff185d54bc0007b19a8d9bc390c6bfeb12" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
+rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }
+shared-translator = { package = "translator", git = "https://github.com/LiGoldragon/translator", rev = "c38b0529437ae452c7047c6ace920c58e4c1f0fc", features = ["text"] }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "8477b11ac97f21e58a3660457ad4d9c89918767f", features = ["datom"] }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "8f4c34ccef4f103352edd3d54e22eb4c19589d3c", features = ["datom"] }
+emission-belief-nexus = { path = "../emission", features = ["datom"] }
+nix = { version = "0.30", features = ["socket", "user"] }
