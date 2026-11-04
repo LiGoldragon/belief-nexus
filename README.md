@@ -18,7 +18,8 @@ the Nexus-to-translator effect contract.
 
 ## Nix
 
-The flake exposes `translator`, `cli`, and `meta-cli` packages. `nix flake
+The flake's default is the `nexus` package and it also exposes `translator`,
+`cli`, and `meta-cli`. `nix flake
 check` builds the workspace tests and verifies that the generated prefix of the
 emission Rust projection exactly matches its Ethos declaration. The root
 `Cargo.lock` is committed deliberately so the workspace and the Nix proof use
