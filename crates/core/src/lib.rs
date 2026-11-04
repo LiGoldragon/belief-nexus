@@ -123,6 +123,7 @@ pub struct SuccessfulPublication {
     pub generation_id: wire::GenerationId,
     pub publication_revision: wire::PublicationRevision,
     pub source_revisions: Vec<(wire::Repository, wire::SourceRevision)>,
+    pub placement: wire::Placement,
 }
 
 #[derive(Clone, Debug)]
@@ -496,6 +497,7 @@ impl BeliefCore {
                 .iter()
                 .map(|state| (state.repository.clone(), state.source_revision.clone()))
                 .collect(),
+            placement: placement(&publication.workspace, &publication.workspace_image.layout),
         });
         record.last_found = found_vector.clone();
         record.last_missing = missing.clone();
@@ -503,6 +505,7 @@ impl BeliefCore {
             workspace: workspace.clone(),
             generation_id: publication.generation_id,
             publication_revision: publication.intended_publication.0,
+            placement: placement(&publication.workspace, &publication.workspace_image.layout),
             found_vector,
             module_name_vector: missing,
         })
@@ -536,6 +539,17 @@ impl BeliefCore {
                 }
             })
             .collect()
+    }
+}
+
+fn placement(workspace: &wire::Workspace, layout: &meta::Layout) -> wire::Placement {
+    let root = workspace.0 .0.trim_end_matches('/');
+    let owned = layout.owned_root.0 .0.trim_matches('/');
+    let current = layout.current_link.0 .0.trim_matches('/');
+    let instructions = layout.instructions_file.0 .0.trim_matches('/');
+    wire::Placement {
+        system_prompt: wire::SystemPrompt(format!("{root}/{owned}/{current}/{instructions}")),
+        skills: wire::Skills(format!("{root}/{owned}/{current}/skills")),
     }
 }
 
