@@ -17,10 +17,11 @@ use std::{
     path::PathBuf,
 };
 
+pub mod server;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonBootstrap {
     pub nexus: meta::NexusBootstrap,
-    pub memory_file: PathBuf,
 }
 
 fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
@@ -62,19 +63,16 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
 }
 
 fn validate_bootstrap(value: &meta::NexusBootstrap) -> Result<(), BootstrapError> {
-    if value.ordinary_socket.0 .0 == value.meta_socket.0 .0 {
+    if value.ordinary_socket.0 .0 == value.meta_socket.0 .0
+        || value.ordinary_socket.0 .0 == value.emission_translator_socket.0 .0
+        || value.meta_socket.0 .0 == value.emission_translator_socket.0 .0
+    {
         return Err(BootstrapError::SocketCollision);
     }
     if value.admission.byte_limit.0 <= 0 || value.admission.timeout.0 <= 0 {
         return Err(BootstrapError::InvalidAdmission);
     }
     Ok(())
-}
-
-fn paired(pair: &meta::PairedProcess, caller: &wire::Caller) -> bool {
-    pair.user_id == caller.user_id
-        && pair.group_id == caller.group_id
-        && pair.process_id == caller.process_id
 }
 
 fn peer_allowed(peers: &wire::PeerList, caller: &wire::Caller) -> bool {
@@ -296,17 +294,27 @@ mod tests {
             nexus: meta::NexusBootstrap {
                 ordinary_socket: meta::OrdinarySocket(meta::SocketPath("/run/ordinary".into())),
                 meta_socket: meta::MetaSocket(meta::SocketPath("/run/meta".into())),
+                emission_translator_socket: meta::EmissionTranslatorSocket(meta::SocketPath(
+                    "/run/translator".into(),
+                )),
+                memory_path: meta::MemoryPath("/unused".into()),
                 admission: meta::Admission {
                     byte_limit: meta::ByteLimit(1_000_000),
                     timeout: meta::Timeout(5_000),
                 },
-                paired_process: meta::PairedProcess {
+                paired_translator: meta::PairedTranslator {
                     user_id: wire::UserId(1000),
                     group_id: wire::GroupId(1000),
                     process_id: wire::ProcessId(44),
                 },
+                bootstrap_owner: meta::BootstrapOwner(wire::PeerIdentity {
+                    peer_name: wire::PeerName("client".into()),
+                    user_id: wire::UserId(1000),
+                    group_id: wire::GroupId(1000),
+                    executable_path: wire::ExecutablePath("/nix/client".into()),
+                    contract_digest: wire::ContractDigest("contract".into()),
+                }),
             },
-            memory_file: PathBuf::from("/unused"),
         }
     }
 
@@ -678,7 +686,7 @@ impl FileMemory {
 
 impl<E: EmissionPort> Daemon<E, FileMemory> {
     pub fn start_file(bootstrap: DaemonBootstrap, effects: E) -> Result<Self, BootstrapError> {
-        let store = FileMemory::new(bootstrap.memory_file.clone());
+        let store = FileMemory::new(PathBuf::from(&bootstrap.nexus.memory_path.0));
         Self::start(bootstrap, effects, store)
     }
 }
@@ -851,7 +859,6 @@ struct Subscriber {
 }
 
 pub struct Daemon<E, M> {
-    bootstrap: meta::NexusBootstrap,
     effects: E,
     store: M,
     memory: MemoryImage,
@@ -868,13 +875,18 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         mut store: M,
     ) -> Result<Self, BootstrapError> {
         validate_bootstrap(&bootstrap.nexus)?;
-        let memory = store
-            .load()
-            .map_err(BootstrapError::Memory)?
-            .unwrap_or_else(MemoryImage::empty);
+        let loaded = store.load().map_err(BootstrapError::Memory)?;
+        let mut memory = loaded.clone().unwrap_or_else(MemoryImage::empty);
+        if loaded.is_none() {
+            memory.configuration.meta_peers = Some(wire::PeerList(vec![bootstrap
+                .nexus
+                .bootstrap_owner
+                .0
+                .clone()]));
+            store.store(&memory).map_err(BootstrapError::Memory)?;
+        }
         let core = rebuild_core(&memory).map_err(|_| BootstrapError::CorruptState)?;
         let mut daemon = Self {
-            bootstrap: bootstrap.nexus,
             effects,
             store,
             memory,
@@ -917,6 +929,25 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 .map(|subscription| subscription.initial.response)
                 .unwrap_or_else(wire::Response::Refused),
         }
+    }
+
+    pub fn open_subscription(&mut self, call: wire::Call) -> Result<Subscription, wire::Response> {
+        if !self.authorized_ordinary(&call.caller) {
+            return Err(wire::Response::Refused(wire::Refusal::NotAuthorized(
+                call.caller,
+            )));
+        }
+        if !self.memory.configuration.ready() {
+            return Err(wire::Response::Refused(wire::Refusal::NotReady));
+        }
+        if !matches!(call.query, wire::Query::Subscribe) {
+            return Err(wire::Response::Refused(wire::Refusal::NotReady));
+        }
+        self.subscribe(call.caller).map_err(wire::Response::Refused)
+    }
+
+    pub fn polling_timeout(&self) -> Option<meta::Timeout> {
+        self.memory.configuration.repository_polling.clone()
     }
 
     pub fn configure(&mut self, call: meta::MetaCall) -> meta::Response {
@@ -1063,15 +1094,27 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         if let Some(last) = events.last() {
             subscriber.after = last.sequence;
         }
+        self.prune_events();
         Some(events)
     }
 
     pub fn unsubscribe(&mut self, id: i64) {
         self.subscribers.remove(&id);
+        self.prune_events();
     }
 
     pub fn subscriber_owner(&self, id: i64) -> Option<&wire::Caller> {
         Some(&self.subscribers.get(&id)?.owner)
+    }
+
+    fn prune_events(&mut self) {
+        let after = self
+            .subscribers
+            .values()
+            .map(|subscriber| subscriber.after)
+            .min()
+            .unwrap_or(self.memory.next_event_sequence - 1);
+        self.events.retain(|event| event.sequence > after);
     }
 
     fn register(&mut self, owner: wire::Caller, repository: wire::Repository) -> wire::Response {
@@ -1655,13 +1698,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     fn authorized_meta(&self, caller: &wire::Caller) -> bool {
-        paired(&self.bootstrap.paired_process, caller)
-            || self
-                .memory
-                .configuration
-                .meta_peers
-                .as_ref()
-                .is_some_and(|peers| peer_allowed(peers, caller))
+        self.memory
+            .configuration
+            .meta_peers
+            .as_ref()
+            .is_some_and(|peers| peer_allowed(peers, caller))
     }
 
     fn repository(&self, repository: &wire::Repository) -> Option<&StoredRepository> {

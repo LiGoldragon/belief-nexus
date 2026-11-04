@@ -25,6 +25,7 @@ dependencies = [
  "belief-nexus-core",
  "emission-belief-nexus",
  "meta-signal-belief-nexus",
+ "nix",
  "rkyv",
  "signal",
  "signal-belief-nexus",
