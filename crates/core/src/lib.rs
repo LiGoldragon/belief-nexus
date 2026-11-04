@@ -4,6 +4,8 @@
 //! consumes complete, immutable source snapshots and produces complete,
 //! immutable workspace images; it never reads a checkout or edits a workspace.
 
+use emission_belief_nexus as emission;
+use meta_signal_belief_nexus as meta;
 use sha2::{Digest, Sha256};
 use signal_belief_nexus as wire;
 use std::collections::{HashMap, HashSet};
@@ -40,6 +42,45 @@ pub enum ResolveError {
         name: wire::ModuleName,
         repositories: Vec<wire::Repository>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PublicationPlanError {
+    StalePlan,
+    InvalidLayout(wire::RelativePath),
+    ConflictingDestinations(wire::RelativePath, wire::RelativePath),
+    NonTextModule(wire::ModuleName),
+    RevisionExhausted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CompletionError {
+    NoPendingPublication,
+    PublicationIdentityMismatch,
+    RecoveryEvidenceMismatch,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecoveryOutcome {
+    Finalized(wire::FurnishedWorkspace),
+    Retry,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationContext {
+    pub owner: wire::Caller,
+    pub configuration_revision: meta::ConfigurationRevision,
+    pub layout: meta::Layout,
+}
+
+/// The complete intent that Memory must durably store before Publish is emitted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingIntent {
+    pub owner: wire::Caller,
+    pub harness: wire::Harness,
+    pub configuration_revision: meta::ConfigurationRevision,
+    pub requested: Vec<wire::ModuleName>,
+    pub publication: emission::Publication,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,6 +142,12 @@ struct WorkspaceRecord {
     successful: Option<SuccessfulPublication>,
     last_found: Vec<wire::Found>,
     last_missing: Vec<wire::ModuleName>,
+    pending: Option<PendingPublication>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPublication {
+    intent: PendingIntent,
 }
 
 /// Belief's in-memory domain state.
@@ -204,6 +251,7 @@ impl BeliefCore {
                 successful: None,
                 last_found: Vec::new(),
                 last_missing: Vec::new(),
+                pending: None,
             });
         record.harness = request.harness.clone();
         record.requested = requested.clone();
@@ -222,7 +270,7 @@ impl BeliefCore {
             .filter_map(|(name, item)| item.is_none().then_some(name.clone()))
             .collect();
         let image = build_image(&resolved);
-        let source_revisions = revisions_used(&resolved, &self.repositories);
+        let source_revisions = all_revisions(&self.repositories);
         let generation_id = generation_id(&workspace, &image);
 
         Ok(FurnishPlan {
@@ -237,31 +285,124 @@ impl BeliefCore {
         })
     }
 
-    /// Commits only a successfully published candidate.  A stale candidate cannot
-    /// overwrite a newer desired request.
-    pub fn publication_succeeded(
+    /// Persists the exact publication intent in domain state before returning the
+    /// effect.  The caller must durably record this state before it emits Publish.
+    pub fn begin_publication(
         &mut self,
         plan: &FurnishPlan,
-        publication_revision: wire::PublicationRevision,
-    ) -> Option<wire::FurnishedWorkspace> {
-        let record = self.workspaces.get_mut(&plan.workspace)?;
-        if record.harness != plan.harness || record.requested != plan.requested {
-            return None;
+        context: PublicationContext,
+    ) -> Result<emission::Publication, PublicationPlanError> {
+        validate_layout(&context.layout)?;
+        if !self.plan_is_current(plan) {
+            return Err(PublicationPlanError::StalePlan);
         }
-        record.successful = Some(SuccessfulPublication {
-            generation_id: plan.generation_id.clone(),
-            publication_revision: publication_revision.clone(),
-            source_revisions: plan.source_revisions.clone(),
-        });
-        record.last_found = plan.found.clone();
-        record.last_missing = plan.missing.clone();
-        Some(wire::FurnishedWorkspace {
+
+        let prior = self
+            .workspaces
+            .get(&plan.workspace)
+            .and_then(|record| record.successful.as_ref())
+            .map(|successful| successful.publication_revision.clone());
+        let intended = wire::PublicationRevision(
+            prior
+                .as_ref()
+                .map_or(Ok(1), |revision| revision.0.checked_add(1).ok_or(()))
+                .map_err(|()| PublicationPlanError::RevisionExhausted)?,
+        );
+        let publication = emission::Publication {
             workspace: plan.workspace.clone(),
             generation_id: plan.generation_id.clone(),
-            publication_revision,
-            found_vector: plan.found.clone(),
-            module_name_vector: plan.missing.clone(),
-        })
+            prior_publication: emission::PriorPublication(prior),
+            intended_publication: emission::IntendedPublication(intended),
+            workspace_image: emission_image(&plan.image, context.layout.clone())?,
+            repository_states: emission::RepositoryStates(
+                plan.source_revisions
+                    .iter()
+                    .map(|(repository, source_revision)| wire::RepositoryState {
+                        repository: repository.clone(),
+                        source_revision: source_revision.clone(),
+                    })
+                    .collect(),
+            ),
+            found_modules: emission::FoundModules(
+                plan.found.iter().map(|found| found.0.clone()).collect(),
+            ),
+            missing_modules: emission::MissingModules(plan.missing.clone()),
+        };
+        self.workspaces
+            .get_mut(&plan.workspace)
+            .expect("a current furnish plan has a workspace record")
+            .pending = Some(PendingPublication {
+            intent: PendingIntent {
+                owner: context.owner,
+                harness: plan.harness.clone(),
+                configuration_revision: context.configuration_revision,
+                requested: plan.requested.clone(),
+                publication: publication.clone(),
+            },
+        });
+        Ok(publication)
+    }
+
+    pub fn pending_intent(&self, workspace: &wire::Workspace) -> Option<&PendingIntent> {
+        Some(&self.workspaces.get(workspace)?.pending.as_ref()?.intent)
+    }
+
+    /// Accepts an effect result only when it names the exact pending publication.
+    pub fn complete_publication(
+        &mut self,
+        state: &emission::PublicationState,
+    ) -> Result<wire::FurnishedWorkspace, CompletionError> {
+        let pending = self
+            .workspaces
+            .get(&state.workspace)
+            .and_then(|record| record.pending.clone())
+            .ok_or(CompletionError::NoPendingPublication)?;
+        if state.generation_id != pending.intent.publication.generation_id
+            || state.publication_revision != pending.intent.publication.intended_publication.0
+        {
+            return Err(CompletionError::PublicationIdentityMismatch);
+        }
+        self.commit_pending(&state.workspace)
+    }
+
+    /// Recovers a publication whose pointer was replaced before Memory recorded
+    /// success.  Pointer and manifest are independent evidence and both must match
+    /// every identity-bearing field of the pending intent.
+    pub fn recover_publication(
+        &mut self,
+        inspection: &emission::PublicationInspection,
+    ) -> Result<RecoveryOutcome, CompletionError> {
+        let pending = self
+            .workspaces
+            .get(&inspection.workspace)
+            .and_then(|record| record.pending.as_ref())
+            .ok_or(CompletionError::NoPendingPublication)?;
+        let expected_pointer = emission::OwnedPointer {
+            generation_id: pending.intent.publication.generation_id.clone(),
+            publication_revision: pending.intent.publication.intended_publication.0.clone(),
+        };
+        let expected_manifest = manifest_of(&pending.intent.publication);
+        if inspection.owned_pointer_option.as_ref() == Some(&expected_pointer) {
+            if inspection.publication_manifest_option.as_ref() != Some(&expected_manifest) {
+                return Err(CompletionError::RecoveryEvidenceMismatch);
+            }
+            return self
+                .commit_pending(&inspection.workspace)
+                .map(RecoveryOutcome::Finalized);
+        }
+        let prior_pointer = self
+            .workspaces
+            .get(&inspection.workspace)
+            .and_then(|record| record.successful.as_ref())
+            .map(|successful| emission::OwnedPointer {
+                generation_id: successful.generation_id.clone(),
+                publication_revision: successful.publication_revision.clone(),
+            });
+        if inspection.owned_pointer_option == prior_pointer {
+            Ok(RecoveryOutcome::Retry)
+        } else {
+            Err(CompletionError::RecoveryEvidenceMismatch)
+        }
     }
 
     pub fn successful_publication(
@@ -290,16 +431,79 @@ impl BeliefCore {
         let Some(successful) = &record.successful else {
             return true;
         };
-        let Ok(resolved) = self.resolve_sources(&record.requested) else {
+        if self.resolve_sources(&record.requested).is_err() {
             return true;
-        };
-        let current = revisions_used(&resolved, &self.repositories);
+        }
+        let current = all_revisions(&self.repositories);
         successful.source_revisions != current
             || record.last_found.len() + record.last_missing.len() != record.requested.len()
             || self.resolve(&record.requested).is_ok_and(|resolution| {
                 resolution.found_vector != record.last_found
                     || resolution.module_name_vector != record.last_missing
             })
+    }
+
+    fn plan_is_current(&self, plan: &FurnishPlan) -> bool {
+        let Some(record) = self.workspaces.get(&plan.workspace) else {
+            return false;
+        };
+        if record.harness != plan.harness || record.requested != plan.requested {
+            return false;
+        }
+        let Ok(resolved) = self.resolve_sources(&plan.requested) else {
+            return false;
+        };
+        let image = build_image(&resolved);
+        plan.image == image
+            && plan.generation_id == generation_id(&plan.workspace, &image)
+            && plan.source_revisions == all_revisions(&self.repositories)
+    }
+
+    fn commit_pending(
+        &mut self,
+        workspace: &wire::Workspace,
+    ) -> Result<wire::FurnishedWorkspace, CompletionError> {
+        let record = self
+            .workspaces
+            .get_mut(workspace)
+            .ok_or(CompletionError::NoPendingPublication)?;
+        let pending = record
+            .pending
+            .take()
+            .ok_or(CompletionError::NoPendingPublication)?;
+        if record.requested != pending.intent.requested || record.harness != pending.intent.harness
+        {
+            record.pending = Some(pending);
+            return Err(CompletionError::PublicationIdentityMismatch);
+        }
+        let publication = pending.intent.publication;
+        let found_vector: Vec<_> = publication
+            .found_modules
+            .0
+            .iter()
+            .cloned()
+            .map(wire::Found)
+            .collect();
+        let missing = publication.missing_modules.0.clone();
+        record.successful = Some(SuccessfulPublication {
+            generation_id: publication.generation_id.clone(),
+            publication_revision: publication.intended_publication.0.clone(),
+            source_revisions: publication
+                .repository_states
+                .0
+                .iter()
+                .map(|state| (state.repository.clone(), state.source_revision.clone()))
+                .collect(),
+        });
+        record.last_found = found_vector.clone();
+        record.last_missing = missing.clone();
+        Ok(wire::FurnishedWorkspace {
+            workspace: workspace.clone(),
+            generation_id: publication.generation_id,
+            publication_revision: publication.intended_publication.0,
+            found_vector,
+            module_name_vector: missing,
+        })
     }
 
     fn resolve_sources<'a>(
@@ -331,6 +535,121 @@ impl BeliefCore {
             })
             .collect()
     }
+}
+
+impl From<emission::SourceSnapshot> for SourceSnapshot {
+    fn from(snapshot: emission::SourceSnapshot) -> Self {
+        Self {
+            repository: snapshot.repository,
+            revision: snapshot.source_revision,
+            modules: snapshot
+                .module_source_vector
+                .into_iter()
+                .map(|module| ModuleSource {
+                    name: module.module_name,
+                    relative_path: module.relative_path,
+                    bytes: module.content.0.into_bytes(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn emission_image(
+    image: &WorkspaceImage,
+    layout: meta::Layout,
+) -> Result<emission::WorkspaceImage, PublicationPlanError> {
+    let content = String::from_utf8(image.model_instructions.clone()).map_err(|_| {
+        PublicationPlanError::NonTextModule(wire::ModuleName {
+            kind: wire::Kind::Spirit,
+            subject: wire::Subject("bundle".into()),
+        })
+    })?;
+    let mut skill_file_vector = Vec::with_capacity(image.skills.len());
+    for skill in &image.skills {
+        let content = String::from_utf8(skill.bytes.clone())
+            .map_err(|_| PublicationPlanError::NonTextModule(skill.name.clone()))?;
+        skill_file_vector.push(emission::SkillFile {
+            relative_path: wire::RelativePath(format!(
+                "{}-{}/SKILL.md",
+                kind_name(&skill.name.kind),
+                skill.name.subject.0
+            )),
+            content: emission::Content(content),
+        });
+    }
+    Ok(emission::WorkspaceImage {
+        layout,
+        content: emission::Content(content),
+        skill_file_vector,
+    })
+}
+
+fn manifest_of(publication: &emission::Publication) -> emission::PublicationManifest {
+    emission::PublicationManifest {
+        generation_id: publication.generation_id.clone(),
+        intended_publication: publication.intended_publication.clone(),
+        repository_states: publication.repository_states.clone(),
+        found_modules: publication.found_modules.clone(),
+        missing_modules: publication.missing_modules.clone(),
+    }
+}
+
+fn validate_layout(layout: &meta::Layout) -> Result<(), PublicationPlanError> {
+    let paths = [
+        &layout.owned_root.0,
+        &layout.generations_directory.0,
+        &layout.current_link.0,
+        &layout.settings_file.0,
+        &layout.instructions_file.0,
+        &layout.skills_directory.0,
+    ];
+    for path in paths {
+        if !safe_relative_path(&path.0) {
+            return Err(PublicationPlanError::InvalidLayout(path.clone()));
+        }
+    }
+    // These are the three independently owned workspace destinations.  Internal
+    // generation/current/instruction names are relative to owned_root.
+    let owned = &layout.owned_root.0 .0;
+    let settings = &layout.settings_file.0 .0;
+    let skills = &layout.skills_directory.0 .0;
+    for (first, second) in [(owned, settings), (owned, skills), (settings, skills)] {
+        if path_overlaps(first, second) {
+            return Err(PublicationPlanError::ConflictingDestinations(
+                wire::RelativePath(first.clone()),
+                wire::RelativePath(second.clone()),
+            ));
+        }
+    }
+    let generations = &layout.generations_directory.0 .0;
+    let current = &layout.current_link.0 .0;
+    if path_overlaps(generations, current) {
+        return Err(PublicationPlanError::ConflictingDestinations(
+            wire::RelativePath(generations.clone()),
+            wire::RelativePath(current.clone()),
+        ));
+    }
+    Ok(())
+}
+
+fn safe_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn path_overlaps(first: &str, second: &str) -> bool {
+    first == second
+        || second
+            .strip_prefix(first)
+            .is_some_and(|rest| rest.starts_with('/'))
+        || first
+            .strip_prefix(second)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn validate_snapshot(snapshot: &SourceSnapshot) -> Result<RepositoryIndex, SnapshotError> {
@@ -436,20 +755,13 @@ fn build_image(resolved: &[Option<(&wire::Repository, &IndexedModule)>]) -> Work
     }
 }
 
-fn revisions_used(
-    resolved: &[Option<(&wire::Repository, &IndexedModule)>],
+fn all_revisions(
     repositories: &HashMap<wire::Repository, RepositoryIndex>,
 ) -> Vec<(wire::Repository, wire::SourceRevision)> {
-    let mut seen = HashSet::new();
-    let mut revisions = Vec::new();
-    for (repository, _) in resolved.iter().flatten() {
-        if seen.insert((*repository).clone()) {
-            revisions.push((
-                (*repository).clone(),
-                repositories[*repository].revision.clone(),
-            ));
-        }
-    }
+    let mut revisions: Vec<_> = repositories
+        .iter()
+        .map(|(repository, index)| (repository.clone(), index.revision.clone()))
+        .collect();
     revisions.sort_by_key(|(repository, _)| repository_key(repository));
     revisions
 }
@@ -473,10 +785,12 @@ fn hash_bytes(digest: &mut Sha256, bytes: &[u8]) {
 
 fn deduplicate_preserving_order(names: Vec<wire::ModuleName>) -> Vec<wire::ModuleName> {
     let mut seen = HashSet::new();
-    names
+    let mut names: Vec<_> = names
         .into_iter()
         .filter(|name| seen.insert(name.clone()))
-        .collect()
+        .collect();
+    names.sort_by_key(module_key);
+    names
 }
 
 fn module_key(name: &wire::ModuleName) -> String {
@@ -535,6 +849,46 @@ mod tests {
             harness: wire::Harness::Codex,
             module_name_vector: names,
         }
+    }
+
+    fn layout() -> meta::Layout {
+        meta::Layout {
+            owned_root: meta::OwnedRoot(wire::RelativePath(".belief".into())),
+            generations_directory: meta::GenerationsDirectory(wire::RelativePath(
+                "generations".into(),
+            )),
+            current_link: meta::CurrentLink(wire::RelativePath("current".into())),
+            settings_file: meta::SettingsFile(wire::RelativePath(".codex/config.toml".into())),
+            instructions_setting: meta::InstructionsSetting("model_instructions_file".into()),
+            instructions_file: meta::InstructionsFile(wire::RelativePath(
+                "model-instructions.md".into(),
+            )),
+            skills_directory: meta::SkillsDirectory(wire::RelativePath(".agents/skills".into())),
+        }
+    }
+
+    fn publication_context() -> PublicationContext {
+        PublicationContext {
+            owner: wire::Caller {
+                user_id: wire::UserId(1000),
+                group_id: wire::GroupId(1000),
+                process_id: wire::ProcessId(42),
+                executable_path: wire::ExecutablePath("/nix/store/client".into()),
+                contract_digest: wire::ContractDigest("sha256:contract".into()),
+            },
+            configuration_revision: meta::ConfigurationRevision(3),
+            layout: layout(),
+        }
+    }
+
+    fn publish(core: &mut BeliefCore, plan: &FurnishPlan) -> wire::FurnishedWorkspace {
+        let publication = core.begin_publication(plan, publication_context()).unwrap();
+        core.complete_publication(&emission::PublicationState {
+            workspace: publication.workspace,
+            generation_id: publication.generation_id,
+            publication_revision: publication.intended_publication.0,
+        })
+        .unwrap()
     }
 
     #[test]
@@ -611,8 +965,7 @@ mod tests {
         let first = core
             .prepare_furnish(request("/w", vec![vision.clone()]))
             .unwrap();
-        core.publication_succeeded(&first, wire::PublicationRevision(1))
-            .unwrap();
+        publish(&mut core, &first);
 
         let removed = core.observe(snapshot("/r", "two", vec![])).unwrap();
         assert_eq!(removed.changed, vec![vision.clone()]);
@@ -647,9 +1000,7 @@ mod tests {
         let first = core
             .prepare_furnish(request("/w", vec![vision.clone()]))
             .unwrap();
-        let published = core
-            .publication_succeeded(&first, wire::PublicationRevision(7))
-            .unwrap();
+        let published = publish(&mut core, &first);
         core.observe(snapshot("/b", "b1", vec![(vision.clone(), b"b")]))
             .unwrap();
 
@@ -665,7 +1016,7 @@ mod tests {
         );
         let success = core.successful_publication(&workspace("/w")).unwrap();
         assert_eq!(success.generation_id, published.generation_id);
-        assert_eq!(success.publication_revision, wire::PublicationRevision(7));
+        assert_eq!(success.publication_revision, wire::PublicationRevision(1));
         assert_eq!(core.retry_workspaces(), vec![workspace("/w")]);
     }
 
@@ -686,13 +1037,26 @@ mod tests {
         assert_eq!(core.retry_workspaces(), vec![workspace("/w")]);
         assert!(core.successful_publication(&workspace("/w")).is_none());
 
+        let old_publication = core.begin_publication(&old, publication_context()).unwrap();
         let current = core.prepare_furnish(request("/w", vec![role])).unwrap();
-        assert!(core
-            .publication_succeeded(&old, wire::PublicationRevision(1))
-            .is_none());
-        assert!(core.successful_publication(&workspace("/w")).is_none());
-        core.publication_succeeded(&current, wire::PublicationRevision(2))
+        let current_publication = core
+            .begin_publication(&current, publication_context())
             .unwrap();
+        assert_eq!(
+            core.complete_publication(&emission::PublicationState {
+                workspace: old_publication.workspace,
+                generation_id: old_publication.generation_id,
+                publication_revision: old_publication.intended_publication.0,
+            }),
+            Err(CompletionError::PublicationIdentityMismatch)
+        );
+        assert!(core.successful_publication(&workspace("/w")).is_none());
+        core.complete_publication(&emission::PublicationState {
+            workspace: current_publication.workspace,
+            generation_id: current_publication.generation_id,
+            publication_revision: current_publication.intended_publication.0,
+        })
+        .unwrap();
         assert!(core.retry_workspaces().is_empty());
     }
 
@@ -705,8 +1069,7 @@ mod tests {
         let plan = core
             .prepare_furnish(request("/w", vec![vision.clone()]))
             .unwrap();
-        core.publication_succeeded(&plan, wire::PublicationRevision(1))
-            .unwrap();
+        publish(&mut core, &plan);
 
         core.observe(snapshot("/r", "two", vec![(vision, b"two")]))
             .unwrap();
@@ -737,5 +1100,119 @@ mod tests {
             .unwrap();
         assert_eq!(first.image, second.image);
         assert_ne!(first.generation_id, second.generation_id);
+    }
+
+    #[test]
+    fn pending_intent_binds_owner_config_basis_request_and_image_before_publish() {
+        let spirit = name(wire::Kind::Spirit, "core");
+        let vision = name(wire::Kind::Vision, "nexus");
+        let mut core = BeliefCore::new();
+        core.observe(snapshot("/a", "a1", vec![(spirit.clone(), b"spirit")]))
+            .unwrap();
+        core.observe(snapshot("/b", "b1", vec![(vision.clone(), b"vision")]))
+            .unwrap();
+        let plan = core
+            .prepare_furnish(request("/w", vec![vision.clone(), spirit.clone()]))
+            .unwrap();
+        let context = publication_context();
+        let publication = core.begin_publication(&plan, context.clone()).unwrap();
+        let pending = core.pending_intent(&workspace("/w")).unwrap();
+
+        assert_eq!(pending.owner, context.owner);
+        assert_eq!(
+            pending.configuration_revision,
+            context.configuration_revision
+        );
+        assert_eq!(pending.harness, wire::Harness::Codex);
+        assert_eq!(pending.requested, vec![spirit, vision]);
+        assert_eq!(pending.publication, publication);
+        assert_eq!(
+            publication.repository_states.0,
+            vec![
+                wire::RepositoryState {
+                    repository: repo("/a"),
+                    source_revision: wire::SourceRevision("a1".into())
+                },
+                wire::RepositoryState {
+                    repository: repo("/b"),
+                    source_revision: wire::SourceRevision("b1".into())
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn ownership_is_prevalidated_before_pending_or_prior_success_changes() {
+        let vision = name(wire::Kind::Vision, "nexus");
+        let mut core = BeliefCore::new();
+        core.observe(snapshot("/r", "one", vec![(vision.clone(), b"one")]))
+            .unwrap();
+        let plan = core.prepare_furnish(request("/w", vec![vision])).unwrap();
+        let mut context = publication_context();
+        context.layout.settings_file =
+            meta::SettingsFile(wire::RelativePath(".belief/config.toml".into()));
+        assert!(matches!(
+            core.begin_publication(&plan, context),
+            Err(PublicationPlanError::ConflictingDestinations(_, _))
+        ));
+        assert!(core.pending_intent(&workspace("/w")).is_none());
+        assert!(core.successful_publication(&workspace("/w")).is_none());
+    }
+
+    #[test]
+    fn recovery_finalizes_only_exact_pointer_and_manifest_and_preserves_pending_otherwise() {
+        let vision = name(wire::Kind::Vision, "nexus");
+        let mut core = BeliefCore::new();
+        core.observe(snapshot("/r", "one", vec![(vision.clone(), b"one")]))
+            .unwrap();
+        let plan = core.prepare_furnish(request("/w", vec![vision])).unwrap();
+        let publication = core
+            .begin_publication(&plan, publication_context())
+            .unwrap();
+
+        let retry = emission::PublicationInspection {
+            workspace: workspace("/w"),
+            owned_pointer_option: None,
+            publication_manifest_option: None,
+        };
+        assert_eq!(
+            core.recover_publication(&retry).unwrap(),
+            RecoveryOutcome::Retry
+        );
+        assert!(core.pending_intent(&workspace("/w")).is_some());
+
+        let mismatch = emission::PublicationInspection {
+            workspace: workspace("/w"),
+            owned_pointer_option: Some(emission::OwnedPointer {
+                generation_id: publication.generation_id.clone(),
+                publication_revision: publication.intended_publication.0.clone(),
+            }),
+            publication_manifest_option: None,
+        };
+        assert_eq!(
+            core.recover_publication(&mismatch),
+            Err(CompletionError::RecoveryEvidenceMismatch)
+        );
+        assert!(core.pending_intent(&workspace("/w")).is_some());
+
+        let exact = emission::PublicationInspection {
+            workspace: workspace("/w"),
+            owned_pointer_option: Some(emission::OwnedPointer {
+                generation_id: publication.generation_id.clone(),
+                publication_revision: publication.intended_publication.0.clone(),
+            }),
+            publication_manifest_option: Some(manifest_of(&publication)),
+        };
+        assert!(matches!(
+            core.recover_publication(&exact),
+            Ok(RecoveryOutcome::Finalized(_))
+        ));
+        assert!(core.pending_intent(&workspace("/w")).is_none());
+        assert_eq!(
+            core.successful_publication(&workspace("/w"))
+                .unwrap()
+                .publication_revision,
+            publication.intended_publication.0
+        );
     }
 }

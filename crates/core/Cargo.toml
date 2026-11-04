@@ -8,5 +8,7 @@ license = "MIT"
 path = "src/lib.rs"
 
 [dependencies]
+emission-belief-nexus = { path = "../emission" }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "8f4c34ccef4f103352edd3d54e22eb4c19589d3c" }
 sha2 = "0.10"
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "8477b11" }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "8477b11ac97f21e58a3660457ad4d9c89918767f" }
