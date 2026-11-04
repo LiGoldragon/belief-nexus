@@ -631,7 +631,7 @@ impl PublicationPaths {
             .map_err(|_| PublicationEvidence::InvalidSettings)?;
         let key = &publication.workspace_image.layout.instructions_setting.0;
         if key.is_empty() { return Err(PublicationEvidence::InvalidSettings); }
-        let value = format!("{}/{}", relative_from(&self.workspace, &self.current), self.instructions.to_string_lossy());
+        let value = self.current.join(&self.instructions).to_string_lossy().into_owned();
         let marker = format!("{key}_belief_nexus_managed");
         match document.get(key) {
             None => {
@@ -862,9 +862,6 @@ fn read_manifest(path: &Path) -> Result<PublicationManifest, ()> {
     Signal::<PublicationManifest>::from(bytes).restore().map_err(|_| ())
 }
 
-fn relative_from(root: &Path, target: &Path) -> String {
-    target.strip_prefix(root).unwrap_or(target).to_string_lossy().into_owned()
-}
 
 #[cfg(test)]
 mod tests {
@@ -994,7 +991,7 @@ mod tests {
         let settings = fs::read_to_string(workspace.path().join(".codex/config.toml")).unwrap();
         assert!(settings.contains("model = \"gpt-test\""));
         assert!(settings.contains("mode = \"strict\""));
-        assert!(settings.contains("model_instructions_file = \".belief/current/model-instructions.md\""));
+        assert!(settings.contains(&format!("model_instructions_file = \"{}/.belief/current/model-instructions.md\"", workspace.path().display())));
 
         let invalid = publication(
             workspace.path(), "generation-invalid", Some(1), 2, "invalid",
