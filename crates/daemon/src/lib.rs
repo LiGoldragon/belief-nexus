@@ -210,11 +210,31 @@ fn memory_refusal(operation: wire::MemoryOperation) -> wire::Refusal {
     wire::Refusal::Memory(memory_failure(operation, MemoryError::Unavailable))
 }
 
+fn refusal_kind(refusal: &wire::Refusal) -> wire::RefusalKind {
+    match refusal {
+        wire::Refusal::Source(_) => wire::RefusalKind::Source,
+        wire::Refusal::File(_) => wire::RefusalKind::File,
+        wire::Refusal::Memory(_) => wire::RefusalKind::Memory,
+        wire::Refusal::NotAuthorized(_) => wire::RefusalKind::NotAuthorized,
+        wire::Refusal::SubscriberCapacityReached(_) => {
+            wire::RefusalKind::SubscriberCapacityReached
+        }
+        wire::Refusal::NotReady => wire::RefusalKind::NotReady,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WatchFailure {
+    repository: wire::Repository,
+    source_revision_option: Option<wire::SourceRevision>,
+    source_failure: wire::SourceFailure,
+}
+
 fn watch_unavailable(
     repository: wire::Repository,
     revision: Option<wire::SourceRevision>,
-) -> wire::WatchFailure {
-    wire::WatchFailure {
+) -> WatchFailure {
+    WatchFailure {
         repository: repository.clone(),
         source_revision_option: revision,
         source_failure: wire::SourceFailure {
@@ -390,8 +410,16 @@ mod tests {
         wire::Repository(wire::RepositoryPath("/repo".into()))
     }
 
+    fn other_repository() -> wire::Repository {
+        wire::Repository(wire::RepositoryPath("/z-repo".into()))
+    }
+
     fn workspace() -> wire::Workspace {
         wire::Workspace(wire::WorkspacePath("/work".into()))
+    }
+
+    fn workspace_named(name: &str) -> wire::Workspace {
+        wire::Workspace(wire::WorkspacePath(format!("/work/{name}")))
     }
 
     fn snapshot(revision: &str, content: &str) -> emission::SourceSnapshot {
@@ -407,12 +435,40 @@ mod tests {
         }
     }
 
+    fn other_snapshot(revision: &str, content: &str) -> emission::SourceSnapshot {
+        emission::SourceSnapshot {
+            repository: other_repository(),
+            source_revision: wire::SourceRevision(revision.into()),
+            module_source_vector: vec![emission::ModuleSource {
+                module_name: wire::ModuleName {
+                    kind: wire::Kind::Knowledge,
+                    subject: wire::Subject("unrelated".into()),
+                },
+                relative_path: wire::RelativePath("knowledge/unrelated.md".into()),
+                placement_option: None,
+                content: emission::Content(content.into()),
+            }],
+        }
+    }
+
     fn furnish_request() -> wire::FurnishRequest {
         wire::FurnishRequest {
             workspace: workspace(),
             harness: wire::Harness::Codex,
             module_name_vector: vec![module()],
         }
+    }
+
+    fn furnish_request_named(name: &str) -> wire::FurnishRequest {
+        wire::FurnishRequest {
+            workspace: workspace_named(name),
+            harness: wire::Harness::Codex,
+            module_name_vector: vec![module()],
+        }
+    }
+
+    fn peer_owner(name: &str) -> wire::Owner {
+        wire::Owner::Peer(translator::PeerId(name.into()))
     }
 
     fn register(daemon: &mut Daemon<FakeEffects, FakeMemory>) {
@@ -628,7 +684,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_watch_announces_observation_then_retry_publication_without_new_commit() {
+    fn changed_watch_announces_only_successful_publication() {
         let effects = FakeEffects {
             replies: [
                 emission::Response::Snapshotted(snapshot("one", "one")),
@@ -656,25 +712,338 @@ mod tests {
             .replies
             .push_back(emission::Response::Snapshotted(snapshot("two", "two")));
         let events = daemon.poll_once();
-        assert_eq!(events.len(), 2);
-        assert!(matches!(
-            &events[0].response,
-            wire::Response::Changed(wire::Change {
-                furnished_workspace_vector,
-                ..
-            }) if furnished_workspace_vector.is_empty()
-        ));
-        assert!(matches!(
-            &events[1].response,
-            wire::Response::Changed(wire::Change {
-                furnished_workspace_vector,
-                ..
-            }) if furnished_workspace_vector.len() == 1
-        ));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0].response, wire::Response::Changed(_)));
         assert_eq!(
             daemon.memory.repositories[0].snapshot.source_revision,
             wire::SourceRevision("two".into())
         );
+    }
+
+    #[test]
+    fn subscriptions_project_initial_and_future_events_to_workspace_owner() {
+        let mut image = ready_memory();
+        image.configuration.subscriber_capacity = Some(3);
+        image.configuration.ordinary_peers.as_mut().unwrap().0.push(translator::PeerBinding {
+            peer_id: translator::PeerId("other".into()),
+            peer_identity: translator::PeerIdentity {
+                user_id: translator::UserId(1000),
+                process_id: translator::ProcessId(55),
+            },
+        });
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(image), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        let first_owner = peer_owner("client");
+        let second_owner = peer_owner("other");
+        let login_owner = wire::Owner::Login(caller().user_id.clone());
+        for (owner, name) in [
+            (first_owner.clone(), "first"),
+            (second_owner.clone(), "second"),
+            (login_owner.clone(), "login"),
+        ] {
+            assert!(matches!(
+                daemon.handle_as(
+                    wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named(name)) },
+                    owner,
+                ),
+                wire::Response::Furnished(_)
+            ));
+        }
+
+        let first = daemon.subscribe(first_owner.clone()).unwrap();
+        let second = daemon.subscribe(second_owner.clone()).unwrap();
+        let login = daemon.subscribe(login_owner.clone()).unwrap();
+        for (subscription, expected) in [(&first, "first"), (&second, "second"), (&login, "login")] {
+            assert!(matches!(
+                &subscription.initial.response,
+                wire::Response::Subscribed(values)
+                    if values.len() == 1 && values[0].workspace == workspace_named(expected)
+            ));
+        }
+
+        assert!(matches!(
+            daemon.handle_as(
+                wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("first")) },
+                first_owner.clone(),
+            ),
+            wire::Response::Furnished(_)
+        ));
+        assert!(matches!(
+            daemon.drain(first.id).as_deref(),
+            Some([Event { response: wire::Response::Changed(_), .. }])
+        ));
+        assert!(daemon.drain(second.id).unwrap().is_empty());
+        assert!(daemon.drain(login.id).unwrap().is_empty());
+
+        let first_failure = wire::Response::CleanupFailed(wire::CleanupFailure {
+            workspace: workspace_named("first"),
+            generation_id: wire::GenerationId("sha256:first".into()),
+            publication_revision: wire::PublicationRevision(1),
+            file_failure: wire::FileFailure {
+                workspace: workspace_named("first"),
+                file_operation: wire::FileOperation::Cleaning,
+                file_evidence: wire::FileEvidence::PermissionDenied,
+            },
+        });
+        daemon.event(first_owner.clone(), first_failure);
+        for revision in 2..20 {
+            let mut other = daemon.state(&second_owner)[0].clone();
+            other.publication_revision = wire::PublicationRevision(revision);
+            daemon.event(second_owner.clone(), wire::Response::Changed(other));
+        }
+        assert!(matches!(
+            daemon.drain(first.id).as_deref(),
+            Some([Event { response: wire::Response::CleanupFailed(_), .. }])
+        ));
+        assert_eq!(daemon.drain(login.id).unwrap(), Vec::<Event>::new());
+
+        let mut first_changed = daemon.state(&first_owner)[0].clone();
+        first_changed.publication_revision = wire::PublicationRevision(20);
+        daemon.event(first_owner.clone(), wire::Response::Changed(first_changed));
+        assert!(matches!(
+            daemon.drain(first.id).as_deref(),
+            Some([Event { response: wire::Response::Changed(_), .. }])
+        ));
+
+        daemon.unsubscribe(second.id);
+        let reconnected = daemon.subscribe(second_owner).unwrap();
+        assert!(matches!(
+            reconnected.initial.response,
+            wire::Response::Subscribed(ref values)
+                if values.len() == 1 && values[0].workspace == workspace_named("second")
+        ));
+    }
+
+    #[test]
+    fn failed_refurnish_keeps_prior_success_and_emits_no_success() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Furnished(_)
+        ));
+        let subscription = daemon.subscribe(wire::Owner::Login(caller().user_id.clone())).unwrap();
+        daemon.effects.replies.push_back(emission::Response::Snapshotted(snapshot("two", "two")));
+        daemon.effects.replies.push_back(emission::Response::EmissionRefused(
+            emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+                workspace: workspace(),
+                publication_operation: emission::PublicationOperation::StagingGeneration,
+                publication_evidence: emission::PublicationEvidence::PermissionDenied,
+            }),
+        ));
+        daemon.effects.replies.push_back(emission::Response::Inspected(
+            emission::PublicationInspection {
+                workspace: workspace(),
+                owned_pointer_option: None,
+                publication_manifest_option: None,
+            },
+        ));
+        daemon.effects.replies.push_back(emission::Response::EmissionRefused(
+            emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+                workspace: workspace(),
+                publication_operation: emission::PublicationOperation::StagingGeneration,
+                publication_evidence: emission::PublicationEvidence::PermissionDenied,
+            }),
+        ));
+        daemon.poll_once();
+        let events = daemon.drain(subscription.id).unwrap();
+        assert!(!events.is_empty());
+        assert!(events.iter().all(|event| matches!(event.response, wire::Response::RefurnishFailed(_))));
+        assert!(daemon.memory.workspaces[0].pending.is_some());
+        assert!(daemon.memory.workspaces[0].successful.is_some());
+        let reconnect = daemon.subscribe(wire::Owner::Login(caller().user_id)).unwrap_err();
+        assert!(matches!(reconnect, wire::Refusal::SubscriberCapacityReached(1)));
+        daemon.unsubscribe(subscription.id);
+        let reconnect = daemon.subscribe(wire::Owner::Login(translator::UserId(1000))).unwrap();
+        assert!(matches!(reconnect.initial.response, wire::Response::Subscribed(ref values) if values.len() == 1));
+    }
+
+    #[test]
+    fn unrelated_repository_retry_failure_exposes_only_workspace_and_category() {
+        let mut image = ready_memory();
+        image.configuration.subscriber_capacity = Some(2);
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(image), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        daemon.effects.replies.extend([
+            emission::Response::Snapshotted(other_snapshot("other-one", "same")),
+            emission::Response::Snapshotted(other_snapshot("other-one", "same")),
+        ]);
+        assert!(matches!(
+            daemon.handle(wire::Call {
+                caller: caller(),
+                query: wire::Query::Register(other_repository()),
+            }),
+            wire::Response::Registered(_)
+        ));
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Furnished(_)
+        ));
+        let owner = wire::Owner::Login(caller().user_id.clone());
+        let owned = daemon.subscribe(owner).unwrap();
+        let other = daemon.subscribe(peer_owner("client")).unwrap();
+
+        daemon.effects.replies.extend([
+            emission::Response::Snapshotted(snapshot("one", "one")),
+            emission::Response::Snapshotted(other_snapshot("other-two", "same")),
+            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(
+                emission::PublicationRefusal {
+                    workspace: workspace(),
+                    publication_operation: emission::PublicationOperation::StagingGeneration,
+                    publication_evidence: emission::PublicationEvidence::PermissionDenied,
+                },
+            )),
+            emission::Response::Inspected(emission::PublicationInspection {
+                workspace: workspace(),
+                owned_pointer_option: None,
+                publication_manifest_option: None,
+            }),
+        ]);
+        daemon.poll_once();
+        let failures = daemon.drain(owned.id).unwrap();
+        let expected_workspace = workspace();
+        assert!(!failures.is_empty());
+        assert!(failures.iter().all(|event| matches!(
+            event.response,
+            wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                ref workspace,
+                refusal_kind: wire::RefusalKind::File,
+            }) if workspace == &expected_workspace
+        )));
+        assert!(daemon.drain(other.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn refusal_categories_discard_nested_diagnostics() {
+        let repository = repository();
+        let module_name = module();
+        let source_evidence = [
+            wire::SourceEvidence::NotRepository,
+            wire::SourceEvidence::MainUnavailable,
+            wire::SourceEvidence::RevisionUnavailable,
+            wire::SourceEvidence::InvalidModule(wire::InvalidModule {
+                module_name: module_name.clone(),
+                relative_path: wire::RelativePath("vision/nexus.md".into()),
+                invalid_placement: wire::InvalidPlacement::Unknown("secret-placement".into()),
+            }),
+            wire::SourceEvidence::Ambiguous(wire::Ambiguous_Data {
+                module_name,
+                repository_vector: vec![repository.clone(), other_repository()],
+            }),
+            wire::SourceEvidence::Translator(wire::Diagnostic {
+                executable_path: wire::ExecutablePath("/private/git".into()),
+                exit_status_option: Some(wire::ExitStatus(7)),
+                string: "private diagnostic".into(),
+            }),
+        ];
+        for source_evidence in source_evidence {
+            let refusal = wire::Refusal::Source(wire::SourceFailure {
+                repository: repository.clone(),
+                source_operation: wire::SourceOperation::Watching,
+                source_evidence,
+            });
+            assert_eq!(refusal_kind(&refusal), wire::RefusalKind::Source);
+        }
+        let caller = caller();
+        let remaining = [
+            (
+                wire::Refusal::File(wire::FileFailure {
+                    workspace: workspace(),
+                    file_operation: wire::FileOperation::Staging,
+                    file_evidence: wire::FileEvidence::PermissionDenied,
+                }),
+                wire::RefusalKind::File,
+            ),
+            (memory_refusal(wire::MemoryOperation::Recovering), wire::RefusalKind::Memory),
+            (wire::Refusal::NotAuthorized(caller), wire::RefusalKind::NotAuthorized),
+            (wire::Refusal::SubscriberCapacityReached(4), wire::RefusalKind::SubscriberCapacityReached),
+            (wire::Refusal::NotReady, wire::RefusalKind::NotReady),
+        ];
+        for (refusal, expected) in remaining {
+            assert_eq!(refusal_kind(&refusal), expected);
+        }
+    }
+
+    #[test]
+    fn cross_owner_cannot_replace_workspace() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut image = ready_memory();
+        image.configuration.ordinary_peers.as_mut().unwrap().0.push(translator::PeerBinding {
+            peer_id: translator::PeerId("other".into()),
+            peer_identity: translator::PeerIdentity {
+                user_id: translator::UserId(1000),
+                process_id: translator::ProcessId(55),
+            },
+        });
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(image), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle_as(
+                wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) },
+                peer_owner("client"),
+            ),
+            wire::Response::Furnished(_)
+        ));
+        let response = daemon.handle_as(
+            wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) },
+            peer_owner("other"),
+        );
+        assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotAuthorized(_))));
     }
 
     #[test]
@@ -960,6 +1329,7 @@ impl MemoryImage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     pub sequence: i64,
+    pub owner: wire::Owner,
     pub response: wire::Response,
 }
 
@@ -981,6 +1351,7 @@ pub struct Daemon<E, M> {
     memory: MemoryImage,
     core: BeliefCore,
     events: Vec<Event>,
+    watch_failures: Vec<WatchFailure>,
     subscribers: HashMap<i64, Subscriber>,
     next_subscriber: i64,
 }
@@ -1005,6 +1376,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             memory,
             core,
             events: Vec::new(),
+            watch_failures: Vec::new(),
             subscribers: HashMap::new(),
             next_subscriber: 1,
         };
@@ -1194,6 +1566,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
 
     pub fn poll_once(&mut self) -> Vec<Event> {
         let offset = self.events.len();
+        self.watch_failures.clear();
         let repositories: Vec<_> = self
             .memory
             .repositories
@@ -1213,16 +1586,16 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 emission::Response::Snapshotted(snapshot) => self.apply_snapshot(snapshot),
                 emission::Response::EmissionRefused(emission::EmissionRefusal::Source(source)) => {
                     let failure = map_source(source, wire::SourceOperation::Watching);
-                    self.event(wire::Response::WatchFailed(wire::WatchFailure {
+                    self.watch_failures.push(WatchFailure {
                         repository,
                         source_revision_option: Some(old_revision),
                         source_failure: failure,
-                    }));
+                    });
                 }
-                _ => self.event(wire::Response::WatchFailed(watch_unavailable(
+                _ => self.watch_failures.push(watch_unavailable(
                     repository,
                     Some(old_revision),
-                ))),
+                )),
             }
         }
         self.retry_pending_events();
@@ -1237,11 +1610,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .events
             .iter()
             .filter(|event| event.sequence > subscriber.after)
+            .filter(|event| same_owner(&event.owner, &subscriber.owner))
             .cloned()
             .collect();
-        if let Some(last) = events.last() {
-            subscriber.after = last.sequence;
-        }
+        subscriber.after = self.memory.next_event_sequence - 1;
         self.prune_events();
         Some(events)
     }
@@ -1427,6 +1799,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     Err(_) => return wire::Response::Refused(file_refusal(state.workspace)),
                 };
                 let before = self.workspace(&state.workspace).cloned();
+                let owner = before.as_ref().map(|stored| stored.owner.clone());
                 if let Some(stored) = self.workspace_mut(&state.workspace) {
                     if let Some(previous) = stored.successful.take() {
                         stored.successful_history.push(SuccessfulGeneration {
@@ -1461,8 +1834,13 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                                 error,
                             ),
                         });
-                    self.event(answer.clone());
+                    if let Some(owner) = owner {
+                        self.event(owner, answer.clone());
+                    }
                     return answer;
+                }
+                if let Some(owner) = owner {
+                    self.event(owner, wire::Response::Changed(furnished.clone()));
                 }
                 self.clean_after_success(&furnished);
                 wire::Response::Furnished(furnished)
@@ -1542,6 +1920,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let Some(stored) = self.workspace(&maintenance.workspace).cloned() else {
             return;
         };
+        let owner = stored.owner.clone();
         let request = emission::CleanupRequest {
             workspace: maintenance.workspace.clone(),
             generation_id: maintenance.generation_id.clone(),
@@ -1566,7 +1945,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 }
             }
             emission::Response::CleanupRefused(file_failure) => {
-                self.event(wire::Response::CleanupFailed(wire::CleanupFailure {
+                self.event(owner, wire::Response::CleanupFailed(wire::CleanupFailure {
                     workspace: maintenance.workspace,
                     generation_id: maintenance.generation_id,
                     publication_revision: maintenance.publication_revision,
@@ -1610,7 +1989,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                             if let Ok(core) = rebuild_core(&self.memory) {
                                 self.core = core;
                             }
-                            return Some(wire::Response::MemoryAfterPublication(
+                            let answer = wire::Response::MemoryAfterPublication(
                                 wire::MemoryAfterPublication {
                                     workspace: workspace.clone(),
                                     generation_id: furnished.generation_id,
@@ -1620,8 +1999,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                                         MemoryError::Unavailable,
                                     ),
                                 },
-                            ));
+                            );
+                            self.event(stored.owner.clone(), answer.clone());
+                            return Some(answer);
                         }
+                        self.event(stored.owner.clone(), wire::Response::Changed(furnished.clone()));
                         self.clean_after_success(&furnished);
                         Some(wire::Response::Furnished(furnished))
                     }
@@ -1645,10 +2027,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let change = match self.core.observe(snapshot.clone().into()) {
             Ok(change) => change,
             Err(_) => {
-                self.event(wire::Response::WatchFailed(watch_unavailable(
+                self.watch_failures.push(watch_unavailable(
                     repository,
                     Some(revision),
-                )));
+                ));
                 return;
             }
         };
@@ -1662,34 +2044,20 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             }
             return;
         }
-        self.event(wire::Response::Changed(wire::Change {
-            repository: repository.clone(),
-            source_revision: revision.clone(),
-            module_name_vector: change.changed,
-            furnished_workspace_vector: Vec::new(),
-        }));
         for workspace in change.retry_workspaces {
             let Some(stored) = self.workspace(&workspace).cloned() else {
                 continue;
             };
-            match self.furnish(stored.owner, translator::Caller { user_id: translator::UserId(0), process_id: translator::ProcessId(0) }, stored.request) {
-                wire::Response::Furnished(furnished) => {
-                    self.event(wire::Response::Changed(wire::Change {
-                        repository: repository.clone(),
-                        source_revision: revision.clone(),
-                        module_name_vector: Vec::new(),
-                        furnished_workspace_vector: vec![furnished],
-                    }));
-                }
+            let owner = stored.owner.clone();
+            match self.furnish(owner.clone(), translator::Caller { user_id: translator::UserId(0), process_id: translator::ProcessId(0) }, stored.request) {
+                wire::Response::Furnished(_) => {}
                 wire::Response::Refused(refusal) => {
-                    self.event(wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                    self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
                         workspace,
-                        repository: repository.clone(),
-                        source_revision: revision.clone(),
-                        refusal,
+                        refusal_kind: refusal_kind(&refusal),
                     }));
                 }
-                response => self.event(response),
+                _ => {}
             }
         }
     }
@@ -1701,7 +2069,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         let id = self.next_subscriber;
         self.next_subscriber += 1;
-        let initial = self.next_event(wire::Response::Subscribed(self.state()));
+        let initial = self.next_event(owner.clone(), wire::Response::Subscribed(self.state(&owner)));
         self.subscribers.insert(
             id,
             Subscriber {
@@ -1711,27 +2079,26 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         );
         if self.persist().is_err() {
             self.subscribers.remove(&id);
+            self.memory.next_event_sequence -= 1;
             return Err(memory_refusal(wire::MemoryOperation::Recording));
         }
         Ok(Subscription { id, initial })
     }
 
-    fn state(&self) -> wire::BeliefState {
+    fn state(&self, owner: &wire::Owner) -> Vec<wire::FurnishedWorkspace> {
         let mut furnished: Vec<_> = self
             .memory
             .workspaces
             .iter()
+            .filter(|workspace| same_owner(&workspace.owner, owner))
             .filter_map(|workspace| workspace.successful.clone())
             .collect();
         furnished.sort_by_key(|value| value.workspace.0 .0.clone());
-        wire::BeliefState {
-            repository_state_vector: self.core.repository_states(),
-            furnished_workspace_vector: furnished,
-        }
+        furnished
     }
 
-    fn event(&mut self, response: wire::Response) {
-        let event = self.next_event(response);
+    fn event(&mut self, owner: wire::Owner, response: wire::Response) {
+        let event = self.next_event(owner, response);
         if self.persist().is_ok() {
             self.events.push(event);
         } else {
@@ -1739,10 +2106,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
     }
 
-    fn next_event(&mut self, response: wire::Response) -> Event {
+    fn next_event(&mut self, owner: wire::Owner, response: wire::Response) -> Event {
         let sequence = self.memory.next_event_sequence;
         self.memory.next_event_sequence += 1;
-        Event { sequence, response }
+        Event { sequence, owner, response }
     }
 
     fn retry_pending_events(&mut self) {
@@ -1754,22 +2121,16 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .map(|record| record.request.workspace.clone())
             .collect();
         for workspace in workspaces {
-            let basis = self
-                .workspace(&workspace)
-                .and_then(|record| record.pending.as_ref())
-                .and_then(|pending| pending.repository_states.0.first())
-                .cloned();
+            let owner = self.workspace(&workspace).map(|record| record.owner.clone());
             if let Some(response) = self.recover_one(&workspace) {
-                match (response, basis) {
-                    (wire::Response::Furnished(furnished), Some(state)) => {
-                        self.event(wire::Response::Changed(wire::Change {
-                            repository: state.repository,
-                            source_revision: state.source_revision,
-                            module_name_vector: Vec::new(),
-                            furnished_workspace_vector: vec![furnished],
+                match (response, owner) {
+                    (wire::Response::Refused(refusal), Some(owner)) => {
+                        self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                            workspace,
+                            refusal_kind: refusal_kind(&refusal),
                         }));
                     }
-                    (response, _) => self.event(response),
+                    _ => {}
                 }
             }
         }
