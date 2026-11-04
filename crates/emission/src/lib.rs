@@ -109,31 +109,31 @@ pub struct Publication {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct PublicationState {
-    pub workspace: signal_belief_nexus::Workspace,
+pub struct PublicationIdentity {
     pub generation_id: signal_belief_nexus::GenerationId,
     pub publication_revision: signal_belief_nexus::PublicationRevision,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PublicationState {
+    pub workspace: signal_belief_nexus::Workspace,
+    pub publication_identity: PublicationIdentity,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct InspectionRequest {
     pub workspace: signal_belief_nexus::Workspace,
+    pub publication_identity: PublicationIdentity,
     pub layout: meta_signal_belief_nexus::Layout,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct OwnedPointer {
-    pub generation_id: signal_belief_nexus::GenerationId,
-    pub publication_revision: signal_belief_nexus::PublicationRevision,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct PublicationInspection {
     pub workspace: signal_belief_nexus::Workspace,
-    pub owned_pointer_option: std::option::Option<OwnedPointer>,
+    pub publication_identity_option: std::option::Option<PublicationIdentity>,
     pub publication_manifest_option: std::option::Option<PublicationManifest>,
 }
 #[rustfmt::skip]
@@ -141,7 +141,7 @@ pub struct PublicationInspection {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct CleanupRequest {
     pub workspace: signal_belief_nexus::Workspace,
-    pub generation_id: signal_belief_nexus::GenerationId,
+    pub publication_identity: PublicationIdentity,
     pub layout: meta_signal_belief_nexus::Layout,
 }
 #[rustfmt::skip]
@@ -156,7 +156,7 @@ pub enum CleanupOutcome {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct CleanupState {
     pub workspace: signal_belief_nexus::Workspace,
-    pub generation_id: signal_belief_nexus::GenerationId,
+    pub publication_identity: PublicationIdentity,
     pub cleanup_outcome: CleanupOutcome,
 }
 #[rustfmt::skip]
@@ -473,6 +473,13 @@ impl FileEmission {
             .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
         paths.prevalidate(publication)
             .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
+        let identity = publication.identity();
+        let existing = paths.resolve_publication(&identity)
+            .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
+        let intended_manifest = publication.manifest();
+        if existing.as_ref().is_some_and(|value| value.manifest != intended_manifest) {
+            return Err(publication_refusal(publication, PublicationOperation::InspectingManifest, PublicationEvidence::ManifestMismatch));
+        }
 
         fs::create_dir_all(&paths.generations)
             .and_then(|_| fs::create_dir_all(paths.settings.parent().expect("settings has parent")))
@@ -498,26 +505,21 @@ impl FileEmission {
         paths.write_settings(publication)
             .map_err(|evidence| publication_refusal(publication, PublicationOperation::StagingSettings, evidence))?;
 
-        let generation = paths.generation(&publication.generation_id)
-            .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
-        let intended_manifest = publication.manifest();
-        if generation.exists() {
-            let existing = read_manifest(&generation.join("manifest.signal"))
-                .map_err(|_| publication_refusal(publication, PublicationOperation::InspectingManifest, PublicationEvidence::ManifestMismatch))?;
-            if existing != intended_manifest {
-                return Err(publication_refusal(publication, PublicationOperation::InspectingManifest, PublicationEvidence::ManifestMismatch));
-            }
+        let generation = if let Some(existing) = existing {
+            existing.path
         } else {
+            let generation = paths.publication_directory(&identity)
+                .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
             paths.stage_generation(publication, &generation, &intended_manifest)
                 .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
-        }
+            generation
+        };
 
         paths.replace_current(publication, &generation)
             .map_err(|evidence| publication_refusal(publication, PublicationOperation::ReplacingPointer, evidence))?;
         Ok(PublicationState {
             workspace: publication.workspace.clone(),
-            generation_id: publication.generation_id.clone(),
-            publication_revision: publication.intended_publication.0.clone(),
+            publication_identity: identity,
         })
     }
 
@@ -531,10 +533,17 @@ impl FileEmission {
                 publication_evidence: evidence,
             })),
         };
+        if let Err(evidence) = paths.resolve_publication(&request.publication_identity) {
+            return Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+                workspace: request.workspace,
+                publication_operation: PublicationOperation::InspectingManifest,
+                publication_evidence: evidence,
+            }));
+        }
         match paths.inspect_untrusted() {
             Ok((pointer, manifest)) => Response::Inspected(PublicationInspection {
                 workspace: request.workspace,
-                owned_pointer_option: pointer,
+                publication_identity_option: pointer,
                 publication_manifest_option: manifest,
             }),
             Err(evidence) => Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
@@ -551,9 +560,9 @@ impl FileEmission {
             Ok(paths) => paths,
             Err(evidence) => return Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         };
-        match paths.cleanup(&request.generation_id) {
+        match paths.cleanup(&request.publication_identity) {
             Ok(cleanup_outcome) => Response::Cleaned(CleanupState {
-                workspace: request.workspace, generation_id: request.generation_id, cleanup_outcome,
+                workspace: request.workspace, publication_identity: request.publication_identity, cleanup_outcome,
             }),
             Err(evidence) => Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         }
@@ -589,6 +598,13 @@ fn placement_from_frontmatter(
 }
 
 impl Publication {
+    fn identity(&self) -> PublicationIdentity {
+        PublicationIdentity {
+            generation_id: self.generation_id.clone(),
+            publication_revision: self.intended_publication.0.clone(),
+        }
+    }
+
     fn manifest(&self) -> PublicationManifest {
         PublicationManifest {
             generation_id: self.generation_id.clone(),
@@ -598,6 +614,33 @@ impl Publication {
             missing_modules: self.missing_modules.clone(),
         }
     }
+}
+
+impl PublicationManifest {
+    fn identity(&self) -> PublicationIdentity {
+        PublicationIdentity {
+            generation_id: self.generation_id.clone(),
+            publication_revision: self.intended_publication.0.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LegacyContentDirectory(signal_belief_nexus::GenerationId);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PublicationDirectory(PublicationIdentity);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PublicationAddress {
+    Legacy(LegacyContentDirectory),
+    Publication(PublicationDirectory),
+}
+
+#[derive(Debug)]
+struct ResolvedPublication {
+    path: PathBuf,
+    manifest: PublicationManifest,
 }
 
 #[derive(Debug)]
@@ -660,22 +703,95 @@ impl PublicationPaths {
             }
         }
         let _ = self.rendered_settings(publication)?;
+        let publication_directory = self.publication_directory(&publication.identity())?;
         for skill in &publication.workspace_image.skill_file_vector {
             let relative = safe_relative(&skill.relative_path.0)?;
-            let candidate = self.generations.join(&publication.generation_id.0).join("skills").join(relative);
+            let candidate = publication_directory.join("skills").join(relative);
             if !candidate.starts_with(&self.generations) {
                 return Err(boundary(&self.generations, &candidate));
             }
         }
-        let _ = self.generation(&publication.generation_id)?;
+        let _ = self.legacy_directory(&publication.generation_id)?;
         Ok(())
     }
 
-    fn generation(&self, generation: &signal_belief_nexus::GenerationId) -> Result<PathBuf, PublicationEvidence> {
+    fn validate_generation(&self, generation: &signal_belief_nexus::GenerationId) -> Result<(), PublicationEvidence> {
         if generation.0.is_empty() || generation.0.contains('/') || generation.0.contains('\\') || generation.0 == "." || generation.0 == ".." {
             return Err(boundary(&self.generations, &self.generations.join(&generation.0)));
         }
+        Ok(())
+    }
+
+    fn legacy_directory(&self, generation: &signal_belief_nexus::GenerationId) -> Result<PathBuf, PublicationEvidence> {
+        self.validate_generation(generation)?;
         Ok(self.generations.join(&generation.0))
+    }
+
+    fn publication_component(&self, identity: &PublicationIdentity) -> Result<String, PublicationEvidence> {
+        self.validate_generation(&identity.generation_id)?;
+        if identity.publication_revision.0 <= 0 {
+            return Err(boundary(&self.generations, &self.generations.join(identity.publication_revision.0.to_string())));
+        }
+        let mut hex = String::with_capacity(identity.generation_id.0.len() * 2);
+        for byte in identity.generation_id.0.as_bytes() {
+            use std::fmt::Write as _;
+            write!(&mut hex, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Ok(format!("publication-{}-{hex}", identity.publication_revision.0))
+    }
+
+    fn publication_directory(&self, identity: &PublicationIdentity) -> Result<PathBuf, PublicationEvidence> {
+        Ok(self.generations.join(self.publication_component(identity)?))
+    }
+
+    fn inspect_candidate(&self, path: &Path) -> Result<Option<(PublicationAddress, PublicationManifest)>, PublicationEvidence> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_evidence(path, error)),
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(PublicationEvidence::ManifestMismatch);
+        }
+        let manifest = read_manifest(&path.join("manifest.signal")).map_err(|_| PublicationEvidence::ManifestMismatch)?;
+        let component = path.file_name().and_then(|value| value.to_str()).ok_or(PublicationEvidence::ManifestMismatch)?;
+        let legacy = component == manifest.generation_id.0;
+        let publication = component == self.publication_component(&manifest.identity())?;
+        let address = match (legacy, publication) {
+            (true, false) => PublicationAddress::Legacy(LegacyContentDirectory(manifest.generation_id.clone())),
+            (false, true) => PublicationAddress::Publication(PublicationDirectory(manifest.identity())),
+            _ => return Err(PublicationEvidence::ManifestMismatch),
+        };
+        Ok(Some((address, manifest)))
+    }
+
+    fn resolve_publication(&self, identity: &PublicationIdentity) -> Result<Option<ResolvedPublication>, PublicationEvidence> {
+        let legacy = self.legacy_directory(&identity.generation_id)?;
+        let publication = self.publication_directory(identity)?;
+        if legacy == publication {
+            return Err(PublicationEvidence::ManifestMismatch);
+        }
+        let legacy_value = self.inspect_candidate(&legacy);
+        let publication_value = self.inspect_candidate(&publication);
+        let legacy_value = legacy_value?;
+        let publication_value = publication_value?;
+        let mut matching = Vec::new();
+        if let Some((_, manifest)) = legacy_value {
+            if manifest.identity() == *identity {
+                matching.push(ResolvedPublication { path: legacy, manifest });
+            }
+        }
+        if let Some((_, manifest)) = publication_value {
+            if manifest.identity() != *identity {
+                return Err(PublicationEvidence::ManifestMismatch);
+            }
+            matching.push(ResolvedPublication { path: publication, manifest });
+        }
+        match matching.len() {
+            0 => Ok(None),
+            1 => Ok(matching.pop()),
+            _ => Err(PublicationEvidence::ManifestMismatch),
+        }
     }
 
     fn prepare_capability_links(&self, publication: &Publication) -> Result<(), PublicationEvidence> {
@@ -728,7 +844,8 @@ impl PublicationPaths {
     }
 
     fn stage_generation(&self, publication: &Publication, generation: &Path, manifest: &PublicationManifest) -> Result<(), PublicationEvidence> {
-        let staging = self.generations.join(format!(".staging-{}-{}", publication.generation_id.0, std::process::id()));
+        let address = self.publication_component(&publication.identity())?;
+        let staging = self.generations.join(format!(".staging-{address}-{}", std::process::id()));
         if fs::symlink_metadata(&staging).is_ok() {
             return Err(PublicationEvidence::PermissionDenied);
         }
@@ -768,13 +885,14 @@ impl PublicationPaths {
             }));
         }
         let relative = generation.strip_prefix(&self.owned).map_err(|_| boundary(&self.owned, generation))?;
-        let temporary = self.owned.join(format!(".current-{}-{}", publication.generation_id.0, std::process::id()));
+        let address = self.publication_component(&publication.identity())?;
+        let temporary = self.owned.join(format!(".current-{address}-{}", std::process::id()));
         symlink(relative, &temporary).map_err(|error| io_evidence(&temporary, error))?;
         fs::rename(&temporary, &self.current).map_err(|error| io_evidence(&self.current, error))?;
         sync_directory(&self.owned).map_err(|error| io_evidence(&self.owned, error))
     }
 
-    fn inspect_current(&self, publication: &Publication) -> Result<Option<(OwnedPointer, PublicationManifest)>, PublicationEvidence> {
+    fn inspect_current(&self, publication: &Publication) -> Result<Option<(PublicationIdentity, PublicationManifest)>, PublicationEvidence> {
         let (pointer, manifest) = self.inspect_untrusted()?;
         match (pointer, manifest) {
             (None, None) => Ok(None),
@@ -784,7 +902,7 @@ impl PublicationPaths {
         .map_err(|evidence| { let _ = publication; evidence })
     }
 
-    fn inspect_untrusted(&self) -> Result<(Option<OwnedPointer>, Option<PublicationManifest>), PublicationEvidence> {
+    fn inspect_untrusted(&self) -> Result<(Option<PublicationIdentity>, Option<PublicationManifest>), PublicationEvidence> {
         let target = match fs::read_link(&self.current) {
             Ok(target) => target,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
@@ -793,29 +911,18 @@ impl PublicationPaths {
         let absolute = self.owned.join(&target);
         let relative = absolute.strip_prefix(&self.generations).map_err(|_| boundary(&self.generations, &absolute))?;
         if relative.components().count() != 1 { return Err(boundary(&self.generations, &absolute)); }
-        let manifest = read_manifest(&absolute.join("manifest.signal")).map_err(|_| PublicationEvidence::ManifestMismatch)?;
-        let pointer = OwnedPointer { generation_id: manifest.generation_id.clone(), publication_revision: manifest.intended_publication.0.clone() };
+        let (_, manifest) = self.inspect_candidate(&absolute)?.ok_or(PublicationEvidence::ManifestMismatch)?;
+        let pointer = manifest.identity();
         Ok((Some(pointer), Some(manifest)))
     }
 
-    fn cleanup(&self, target: &signal_belief_nexus::GenerationId) -> Result<CleanupOutcome, PublicationEvidence> {
-        let generation = self.generation(target)?;
-        let metadata = match fs::symlink_metadata(&generation) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(CleanupOutcome::AlreadyAbsent),
-            Err(error) => return Err(io_evidence(&generation, error)),
-        };
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(PublicationEvidence::ManifestMismatch);
-        }
-        let manifest = read_manifest(&generation.join("manifest.signal")).map_err(|_| PublicationEvidence::ManifestMismatch)?;
-        if &manifest.generation_id != target { return Err(PublicationEvidence::ManifestMismatch); }
-
+    fn cleanup(&self, target: &PublicationIdentity) -> Result<CleanupOutcome, PublicationEvidence> {
+        let Some(resolved) = self.resolve_publication(target)? else { return Ok(CleanupOutcome::AlreadyAbsent); };
         // Observation alone authorizes nothing. Re-read the owned pointer
         // immediately before the one exact removal and refuse its target.
-        let current = self.inspect_untrusted()?.0.map(|pointer| pointer.generation_id);
+        let current = self.inspect_untrusted()?.0;
         if current.as_ref() == Some(target) { return Err(PublicationEvidence::OwnedPointerMismatch); }
-        fs::remove_dir_all(&generation).map_err(|error| io_evidence(&generation, error))?;
+        fs::remove_dir_all(&resolved.path).map_err(|error| io_evidence(&resolved.path, error))?;
         sync_directory(&self.generations).map_err(|error| io_evidence(&self.generations, error))?;
         Ok(CleanupOutcome::Removed)
     }
@@ -1008,6 +1115,31 @@ mod tests {
         }
     }
 
+    fn publication_component_for(generation: &str, revision: i64) -> String {
+        let hex: String = generation.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("publication-{revision}-{hex}")
+    }
+
+    fn write_publication_directory(publication: &Publication, generation: &Path) {
+        fs::create_dir_all(generation.join("skills")).unwrap();
+        fs::write(generation.join("model-instructions.md"), &publication.workspace_image.content.0).unwrap();
+        let manifest = publication.manifest().signalize().unwrap();
+        fs::write(generation.join("manifest.signal"), manifest.bytes()).unwrap();
+    }
+
+    fn install_legacy(publication: &Publication, current: bool) -> PathBuf {
+        let workspace = Path::new(&(publication.workspace.0).0);
+        let owned = workspace.join(".belief");
+        let generation = owned.join("generations").join(&publication.generation_id.0);
+        write_publication_directory(publication, &generation);
+        if current {
+            let current_path = owned.join("current");
+            if fs::symlink_metadata(&current_path).is_ok() { fs::remove_file(&current_path).unwrap(); }
+            symlink(PathBuf::from("generations").join(&publication.generation_id.0), current_path).unwrap();
+        }
+        generation
+    }
+
     fn run_git(root: &Path, args: &[&str]) {
         let status = Command::new("git").arg("-C").arg(root).args(args).status().expect("run git fixture");
         assert!(status.success(), "git fixture failed: {args:?}");
@@ -1035,7 +1167,7 @@ mod tests {
     fn inspection_returns_pointer_and_manifest_as_separate_recovery_evidence() {
         let response = Response::Inspected(PublicationInspection {
             workspace: Workspace(WorkspacePath("/tmp/work".into())),
-            owned_pointer_option: Some(OwnedPointer { generation_id: GenerationId("sha256:generation".into()), publication_revision: PublicationRevision(4) }),
+            publication_identity_option: Some(PublicationIdentity { generation_id: GenerationId("sha256:generation".into()), publication_revision: PublicationRevision(4) }),
             publication_manifest_option: Some(PublicationManifest {
                 generation_id: GenerationId("sha256:generation".into()),
                 intended_publication: IntendedPublication(PublicationRevision(4)),
@@ -1087,7 +1219,8 @@ mod tests {
             vec![SkillFile { relative_path: RelativePath("nexus/SKILL.md".into()), content: Content("first skill".into()) }],
         );
         assert!(matches!(emission.execute(Query::Publish(first)), Response::Published(_)));
-        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations/generation-one"));
+        let first_component = publication_component_for("generation-one", 1);
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations").join(&first_component));
         assert_eq!(fs::read_link(workspace.path().join(".agents/skills")).unwrap(), PathBuf::from("../.belief/current/skills"));
         assert_eq!(fs::read_to_string(workspace.path().join("unrelated.txt")).unwrap(), "keep");
         let settings = fs::read_to_string(workspace.path().join(".codex/config.toml")).unwrap();
@@ -1100,20 +1233,22 @@ mod tests {
             vec![SkillFile { relative_path: RelativePath("../escape".into()), content: Content("escape".into()) }],
         );
         assert!(matches!(emission.execute(Query::Publish(invalid)), Response::EmissionRefused(_)));
-        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations/generation-one"));
-        assert!(!workspace.path().join(".belief/generations/generation-invalid").exists());
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations").join(&first_component));
+        assert!(!workspace.path().join(".belief/generations").join(publication_component_for("generation-invalid", 2)).exists());
 
         let second = publication(workspace.path(), "generation-two", Some(1), 2, "second instructions", vec![]);
         assert!(matches!(emission.execute(Query::Publish(second)), Response::Published(_)));
-        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations/generation-two"));
-        assert_eq!(fs::read_to_string(workspace.path().join(".belief/generations/generation-one/model-instructions.md")).unwrap(), "first instructions");
+        let second_component = publication_component_for("generation-two", 2);
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations").join(&second_component));
+        assert_eq!(fs::read_to_string(workspace.path().join(".belief/generations").join(first_component).join("model-instructions.md")).unwrap(), "first instructions");
 
         let inspected = emission.execute(Query::InspectPublication(InspectionRequest {
             workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
+            publication_identity: PublicationIdentity { generation_id: GenerationId("generation-two".into()), publication_revision: PublicationRevision(2) },
             layout: layout(),
         }));
         let Response::Inspected(observed) = inspected else { panic!("inspection refused: {inspected:?}") };
-        assert_eq!(observed.owned_pointer_option.as_ref().unwrap().generation_id, GenerationId("generation-two".into()));
+        assert_eq!(observed.publication_identity_option.as_ref().unwrap().generation_id, GenerationId("generation-two".into()));
         let manifest = observed.publication_manifest_option.unwrap();
         assert_eq!(manifest.generation_id, GenerationId("generation-two".into()));
         assert_eq!(manifest.intended_publication, IntendedPublication(PublicationRevision(2)));
@@ -1239,7 +1374,7 @@ mod tests {
 
         let request = CleanupRequest {
             workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
-            generation_id: GenerationId("first".into()), layout: layout(),
+            publication_identity: PublicationIdentity { generation_id: GenerationId("first".into()), publication_revision: PublicationRevision(1) }, layout: layout(),
         };
         assert!(matches!(emission.execute(Query::Clean(request.clone())), Response::Cleaned(CleanupState {
             cleanup_outcome: CleanupOutcome::Removed, ..
@@ -1249,11 +1384,126 @@ mod tests {
         })));
         let current = CleanupRequest {
             workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
-            generation_id: GenerationId("second".into()), layout: layout(),
+            publication_identity: PublicationIdentity { generation_id: GenerationId("second".into()), publication_revision: PublicationRevision(2) }, layout: layout(),
         };
         assert!(matches!(emission.execute(Query::Clean(current)), Response::CleanupRefused(signal_belief_nexus::FileFailure {
             file_operation: signal_belief_nexus::FileOperation::Cleaning, ..
         })));
-        assert!(workspace.path().join(".belief/generations/second").is_dir());
+        assert!(workspace.path().join(".belief/generations").join(publication_component_for("second", 2)).is_dir());
+    }
+
+    #[test]
+    fn same_generation_publications_coexist_and_cleanup_targets_the_exact_pair() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let first = publication(workspace.path(), "g", None, 1, "same", vec![]);
+        let legacy = install_legacy(&first, true);
+        let second = publication(workspace.path(), "g", Some(1), 2, "same", vec![]);
+        let response = emission.execute(Query::Publish(second));
+        assert!(matches!(response, Response::Published(PublicationState {
+            publication_identity: PublicationIdentity { generation_id: GenerationId(ref value), publication_revision: PublicationRevision(2) }, ..
+        }) if value == "g"));
+        let current = fs::read_link(workspace.path().join(".belief/current")).unwrap();
+        assert_eq!(current, PathBuf::from("generations").join(publication_component_for("g", 2)));
+        assert!(legacy.is_dir());
+
+        let cleaned = emission.execute(Query::Clean(CleanupRequest {
+            workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
+            publication_identity: PublicationIdentity { generation_id: GenerationId("g".into()), publication_revision: PublicationRevision(1) },
+            layout: layout(),
+        }));
+        assert!(matches!(cleaned, Response::Cleaned(CleanupState { cleanup_outcome: CleanupOutcome::Removed, .. })));
+        assert!(!legacy.exists());
+        assert!(workspace.path().join(".belief/generations").join(publication_component_for("g", 2)).is_dir());
+    }
+
+    #[test]
+    fn exact_legacy_pending_publication_is_reused_without_rewrite() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let first = publication(workspace.path(), "old", None, 1, "old", vec![]);
+        install_legacy(&first, true);
+        let pending = publication(workspace.path(), "same", Some(1), 2, "same", vec![]);
+        let legacy = install_legacy(&pending, false);
+        let before = fs::metadata(&legacy).unwrap().modified().unwrap();
+        assert!(matches!(emission.execute(Query::Publish(pending)), Response::Published(_)));
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations/same"));
+        assert_eq!(fs::metadata(&legacy).unwrap().modified().unwrap(), before);
+        assert!(!workspace.path().join(".belief/generations").join(publication_component_for("same", 2)).exists());
+    }
+
+    #[test]
+    fn matching_legacy_and_publication_addresses_refuse_without_changing_current() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let prior = publication(workspace.path(), "old", None, 1, "old", vec![]);
+        install_legacy(&prior, true);
+        let requested = publication(workspace.path(), "g", Some(1), 2, "same", vec![]);
+        install_legacy(&requested, false);
+        let canonical = workspace.path().join(".belief/generations").join(publication_component_for("g", 2));
+        write_publication_directory(&requested, &canonical);
+        let before = fs::read_link(workspace.path().join(".belief/current")).unwrap();
+        assert!(matches!(emission.execute(Query::Publish(requested)), Response::EmissionRefused(_)));
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), before);
+    }
+
+    #[test]
+    fn canonical_path_owned_by_another_legacy_identity_refuses_without_effect() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let prior = publication(workspace.path(), "old", None, 1, "old", vec![]);
+        install_legacy(&prior, true);
+        let occupied_name = publication_component_for("g", 2);
+        let occupied = publication(workspace.path(), &occupied_name, Some(1), 1, "occupied", vec![]);
+        install_legacy(&occupied, false);
+        let before = fs::read_link(workspace.path().join(".belief/current")).unwrap();
+        let requested = publication(workspace.path(), "g", Some(1), 2, "same", vec![]);
+        assert!(matches!(emission.execute(Query::Publish(requested)), Response::EmissionRefused(_)));
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), before);
+    }
+
+    #[test]
+    fn invalid_requested_canonical_manifest_refuses_before_capability_effects() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let requested = publication(workspace.path(), "g", None, 1, "same", vec![]);
+        let canonical = workspace.path().join(".belief/generations").join(publication_component_for("g", 1));
+        fs::create_dir_all(&canonical).unwrap();
+        fs::write(canonical.join("manifest.signal"), b"invalid").unwrap();
+        assert!(matches!(emission.execute(Query::Publish(requested)), Response::EmissionRefused(_)));
+        assert!(!workspace.path().join(".belief/current").exists());
+        assert!(!workspace.path().join(".agents/skills").exists());
+        assert!(!workspace.path().join(".codex/config.toml").exists());
+    }
+
+    #[test]
+    fn canonical_codec_round_trips_utf8_and_is_pair_injective() {
+        let workspace = tempfile::tempdir().unwrap();
+        let paths = PublicationPaths::new(workspace.path(), &layout()).unwrap();
+        let unicode = PublicationIdentity { generation_id: GenerationId("信念".into()), publication_revision: PublicationRevision(2) };
+        assert_eq!(paths.publication_component(&unicode).unwrap(), "publication-2-e4bfa1e5bfb5");
+        assert!(paths.publication_component(&PublicationIdentity {
+            generation_id: GenerationId("g".into()),
+            publication_revision: PublicationRevision(0),
+        }).is_err());
+        let pairs = [
+            PublicationIdentity { generation_id: GenerationId("g".into()), publication_revision: PublicationRevision(2) },
+            PublicationIdentity { generation_id: GenerationId("g2".into()), publication_revision: PublicationRevision(2) },
+            PublicationIdentity { generation_id: GenerationId("g".into()), publication_revision: PublicationRevision(23) },
+            PublicationIdentity { generation_id: GenerationId("publication-2-67".into()), publication_revision: PublicationRevision(1) },
+        ];
+        let names: std::collections::HashSet<_> = pairs.iter().map(|value| paths.publication_component(value).unwrap()).collect();
+        assert_eq!(names.len(), pairs.len());
+    }
+
+    #[test]
+    fn canonical_looking_legacy_name_remains_legacy() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let publication = publication(workspace.path(), "publication-2-67", None, 1, "legacy", vec![]);
+        let legacy = install_legacy(&publication, false);
+        assert!(matches!(emission.execute(Query::Publish(publication)), Response::Published(_)));
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations/publication-2-67"));
+        assert!(legacy.is_dir());
     }
 }

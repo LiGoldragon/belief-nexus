@@ -271,14 +271,17 @@ mod tests {
             } else {
                 match query {
                     emission::Query::Publish(publication) if self.publish_from_query => emission::Response::Published(emission::PublicationState {
-                        workspace: publication.workspace, generation_id: publication.generation_id,
-                        publication_revision: publication.intended_publication.0,
+                        workspace: publication.workspace,
+                        publication_identity: emission::PublicationIdentity {
+                            generation_id: publication.generation_id,
+                            publication_revision: publication.intended_publication.0,
+                        },
                     }),
                     emission::Query::Clean(request) if self.cleanup_failures > 0 => {
                         self.cleanup_failures -= 1;
                         emission::Response::CleanupRefused(wire::FileFailure { workspace: request.workspace, file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::PermissionDenied })
                     }
-                    emission::Query::Clean(request) => emission::Response::Cleaned(emission::CleanupState { workspace: request.workspace, generation_id: request.generation_id, cleanup_outcome: emission::CleanupOutcome::Removed }),
+                    emission::Query::Clean(request) => emission::Response::Cleaned(emission::CleanupState { workspace: request.workspace, publication_identity: request.publication_identity, cleanup_outcome: emission::CleanupOutcome::Removed }),
                     _ => panic!("missing effect reply"),
                 }
             };
@@ -656,7 +659,7 @@ mod tests {
         let pending = durable.workspaces[0].pending.clone().unwrap();
         let inspection = emission::PublicationInspection {
             workspace: workspace(),
-            owned_pointer_option: Some(emission::OwnedPointer {
+            publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: pending.generation_id.clone(),
                 publication_revision: pending.intended_publication.0.clone(),
             }),
@@ -1116,7 +1119,7 @@ mod tests {
         daemon.effects.replies.push_back(emission::Response::Inspected(
             emission::PublicationInspection {
                 workspace: workspace(),
-                owned_pointer_option: None,
+                publication_identity_option: None,
                 publication_manifest_option: None,
             },
         ));
@@ -1191,7 +1194,7 @@ mod tests {
             )),
             emission::Response::Inspected(emission::PublicationInspection {
                 workspace: workspace(),
-                owned_pointer_option: None,
+                publication_identity_option: None,
                 publication_manifest_option: None,
             }),
         ]);
@@ -1333,6 +1336,7 @@ mod tests {
         assert!(matches!(response, wire::Response::Furnished(_)));
         assert!(daemon.memory.workspaces[0].successful.is_some());
         assert_eq!(daemon.memory.cleanup_maintenance.len(), 1);
+        assert_eq!(daemon.memory.cleanup_maintenance[0].publication_revision, wire::PublicationRevision(1));
         assert!(daemon.memory.workspaces[0].pending.is_none());
         assert!(daemon
             .events
@@ -2108,8 +2112,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     let answer =
                         wire::Response::MemoryAfterPublication(wire::MemoryAfterPublication {
                             workspace: state.workspace,
-                            generation_id: state.generation_id,
-                            publication_revision: state.publication_revision,
+                            generation_id: state.publication_identity.generation_id,
+                            publication_revision: state.publication_identity.publication_revision,
                             memory_failure: memory_failure(
                                 wire::MemoryOperation::CompletingPublication,
                                 error,
@@ -2159,7 +2163,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let maintenance = CleanupMaintenance {
             workspace: furnished.workspace.clone(),
             generation_id: target.generation_id,
-            publication_revision: furnished.publication_revision.clone(),
+            publication_revision: target.publication_revision,
         };
         self.memory.cleanup_maintenance.push(maintenance.clone());
         if self.persist().is_err() {
@@ -2186,13 +2190,19 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .workspaces
             .iter()
             .filter_map(|record| record.pending.as_ref())
-            .map(|pending| &pending.generation_id)
+            .map(|pending| emission::PublicationIdentity {
+                generation_id: pending.generation_id.clone(),
+                publication_revision: pending.intended_publication.0.clone(),
+            })
             .collect();
         stored
             .successful_history
             .iter()
             .take(removable)
-            .filter(|generation| !protected.contains(&&generation.generation_id))
+            .filter(|generation| !protected.contains(&emission::PublicationIdentity {
+                generation_id: generation.generation_id.clone(),
+                publication_revision: generation.publication_revision.clone(),
+            }))
             .cloned()
             .collect()
     }
@@ -2204,19 +2214,24 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let owner = stored.owner.clone();
         let request = emission::CleanupRequest {
             workspace: maintenance.workspace.clone(),
-            generation_id: maintenance.generation_id.clone(),
+            publication_identity: emission::PublicationIdentity {
+                generation_id: maintenance.generation_id.clone(),
+                publication_revision: maintenance.publication_revision.clone(),
+            },
             layout: stored.layout,
         };
         match self.emit_effect(emission::Query::Clean(request)) {
             emission::Response::Cleaned(state)
                 if state.workspace == maintenance.workspace
-                    && state.generation_id == maintenance.generation_id =>
+                    && state.publication_identity.generation_id == maintenance.generation_id
+                    && state.publication_identity.publication_revision == maintenance.publication_revision =>
             {
                 let previous = self.memory.clone();
                 if let Some(stored) = self.workspace_mut(&maintenance.workspace) {
                     stored
                         .successful_history
-                        .retain(|generation| generation.generation_id != maintenance.generation_id);
+                        .retain(|generation| generation.generation_id != maintenance.generation_id
+                            || generation.publication_revision != maintenance.publication_revision);
                 }
                 self.memory
                     .cleanup_maintenance
@@ -2242,6 +2257,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let response = self.emit_effect(emission::Query::InspectPublication(
             emission::InspectionRequest {
                 workspace: workspace.clone(),
+                publication_identity: emission::PublicationIdentity {
+                    generation_id: stored.pending.as_ref()?.generation_id.clone(),
+                    publication_revision: stored.pending.as_ref()?.intended_publication.0.clone(),
+                },
                 layout: stored.layout.clone(),
             },
         ));
@@ -2461,7 +2480,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let eligible = self
             .cleanup_candidates(workspace)
             .iter()
-            .any(|candidate| candidate.generation_id == maintenance.generation_id);
+            .any(|candidate| candidate.generation_id == maintenance.generation_id
+                && candidate.publication_revision == maintenance.publication_revision);
         if eligible {
             self.run_cleanup(maintenance);
         } else {

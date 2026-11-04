@@ -377,9 +377,11 @@ impl BeliefCore {
             .get(&state.workspace)
             .and_then(|record| record.pending.clone())
             .ok_or(CompletionError::NoPendingPublication)?;
-        if state.generation_id != pending.intent.publication.generation_id
-            || state.publication_revision != pending.intent.publication.intended_publication.0
-        {
+        let expected_identity = emission::PublicationIdentity {
+            generation_id: pending.intent.publication.generation_id.clone(),
+            publication_revision: pending.intent.publication.intended_publication.0.clone(),
+        };
+        if state.publication_identity != expected_identity {
             return Err(CompletionError::PublicationIdentityMismatch);
         }
         self.commit_pending(&state.workspace)
@@ -397,12 +399,12 @@ impl BeliefCore {
             .get(&inspection.workspace)
             .and_then(|record| record.pending.as_ref())
             .ok_or(CompletionError::NoPendingPublication)?;
-        let expected_pointer = emission::OwnedPointer {
+        let expected_pointer = emission::PublicationIdentity {
             generation_id: pending.intent.publication.generation_id.clone(),
             publication_revision: pending.intent.publication.intended_publication.0.clone(),
         };
         let expected_manifest = manifest_of(&pending.intent.publication);
-        if inspection.owned_pointer_option.as_ref() == Some(&expected_pointer) {
+        if inspection.publication_identity_option.as_ref() == Some(&expected_pointer) {
             if inspection.publication_manifest_option.as_ref() != Some(&expected_manifest) {
                 return Err(CompletionError::RecoveryEvidenceMismatch);
             }
@@ -414,11 +416,11 @@ impl BeliefCore {
             .workspaces
             .get(&inspection.workspace)
             .and_then(|record| record.successful.as_ref())
-            .map(|successful| emission::OwnedPointer {
+            .map(|successful| emission::PublicationIdentity {
                 generation_id: successful.generation_id.clone(),
                 publication_revision: successful.publication_revision.clone(),
             });
-        if inspection.owned_pointer_option == prior_pointer {
+        if inspection.publication_identity_option == prior_pointer {
             Ok(RecoveryOutcome::Retry)
         } else {
             Err(CompletionError::RecoveryEvidenceMismatch)
@@ -957,8 +959,10 @@ mod tests {
         let publication = core.begin_publication(plan, publication_context()).unwrap();
         core.complete_publication(&emission::PublicationState {
             workspace: publication.workspace,
-            generation_id: publication.generation_id,
-            publication_revision: publication.intended_publication.0,
+            publication_identity: emission::PublicationIdentity {
+                generation_id: publication.generation_id,
+                publication_revision: publication.intended_publication.0,
+            },
         })
         .unwrap()
     }
@@ -1117,16 +1121,20 @@ mod tests {
         assert_eq!(
             core.complete_publication(&emission::PublicationState {
                 workspace: old_publication.workspace,
-                generation_id: old_publication.generation_id,
-                publication_revision: old_publication.intended_publication.0,
+                publication_identity: emission::PublicationIdentity {
+                    generation_id: old_publication.generation_id,
+                    publication_revision: old_publication.intended_publication.0,
+                },
             }),
             Err(CompletionError::PublicationIdentityMismatch)
         );
         assert!(core.successful_publication(&workspace("/w")).is_none());
         core.complete_publication(&emission::PublicationState {
             workspace: current_publication.workspace,
-            generation_id: current_publication.generation_id,
-            publication_revision: current_publication.intended_publication.0,
+            publication_identity: emission::PublicationIdentity {
+                generation_id: current_publication.generation_id,
+                publication_revision: current_publication.intended_publication.0,
+            },
         })
         .unwrap();
         assert!(core.retry_workspaces().is_empty());
@@ -1244,7 +1252,7 @@ mod tests {
 
         let retry = emission::PublicationInspection {
             workspace: workspace("/w"),
-            owned_pointer_option: None,
+            publication_identity_option: None,
             publication_manifest_option: None,
         };
         assert_eq!(
@@ -1255,7 +1263,7 @@ mod tests {
 
         let mismatch = emission::PublicationInspection {
             workspace: workspace("/w"),
-            owned_pointer_option: Some(emission::OwnedPointer {
+            publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: publication.generation_id.clone(),
                 publication_revision: publication.intended_publication.0.clone(),
             }),
@@ -1269,7 +1277,7 @@ mod tests {
 
         let exact = emission::PublicationInspection {
             workspace: workspace("/w"),
-            owned_pointer_option: Some(emission::OwnedPointer {
+            publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: publication.generation_id.clone(),
                 publication_revision: publication.intended_publication.0.clone(),
             }),

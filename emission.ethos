@@ -30,13 +30,13 @@ Signal
                          FoundModules MissingModules }
   Publication.{ Workspace GenerationId PriorPublication IntendedPublication
                  WorkspaceImage RepositoryStates FoundModules MissingModules RetentionPolicy }
-  PublicationState.{ Workspace GenerationId PublicationRevision }
-  InspectionRequest.{ Workspace Layout }
-  OwnedPointer.{ GenerationId PublicationRevision }
-  PublicationInspection.{ Workspace Option<OwnedPointer> Option<PublicationManifest> }
-  CleanupRequest.{ Workspace GenerationId Layout }
+  PublicationIdentity.{ GenerationId PublicationRevision }
+  PublicationState.{ Workspace PublicationIdentity }
+  InspectionRequest.{ Workspace PublicationIdentity Layout }
+  PublicationInspection.{ Workspace Option<PublicationIdentity> Option<PublicationManifest> }
+  CleanupRequest.{ Workspace PublicationIdentity Layout }
   CleanupOutcome.[ Removed AlreadyAbsent ]
-  CleanupState.{ Workspace GenerationId CleanupOutcome }
+  CleanupState.{ Workspace PublicationIdentity CleanupOutcome }
   SourceOperation.[ ReadingMain ReadingTree ]
   PublicationOperation.[ StagingSettings StagingGeneration WritingManifest
                           ReplacingPointer InspectingPointer InspectingManifest ]
