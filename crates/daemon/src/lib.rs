@@ -30,6 +30,19 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
             .map_err(|_| ())?;
     }
     for workspace in &memory.workspaces {
+        if let Some(successful) = &workspace.successful {
+            if !core.restore_furnished(
+                workspace.request.clone(),
+                successful.clone(),
+                workspace
+                    .successful_basis
+                    .iter()
+                    .map(|state| (state.repository.clone(), state.source_revision.clone()))
+                    .collect(),
+            ) {
+                return Err(());
+            }
+        }
         let plan = core
             .prepare_furnish(workspace.request.clone())
             .map_err(|_| ())?;
@@ -39,18 +52,6 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
             layout: workspace.layout.clone(),
             retention_policy: workspace.retention.clone(),
         };
-        if let Some(successful) = &workspace.successful {
-            let publication = core.begin_publication(&plan, context()).map_err(|_| ())?;
-            core.complete_publication(&emission::PublicationState {
-                workspace: successful.workspace.clone(),
-                generation_id: successful.generation_id.clone(),
-                publication_revision: successful.publication_revision.clone(),
-            })
-            .map_err(|_| ())?;
-            if publication.generation_id != successful.generation_id {
-                return Err(());
-            }
-        }
         if let Some(pending) = &workspace.pending {
             if &core.begin_publication(&plan, context()).map_err(|_| ())? != pending {
                 return Err(());
@@ -683,6 +684,7 @@ pub struct StoredWorkspace {
     pub layout: meta::Layout,
     pub retention: meta::RetentionPolicy,
     pub successful: Option<wire::FurnishedWorkspace>,
+    pub successful_basis: Vec<wire::RepositoryState>,
     pub pending: Option<emission::Publication>,
 }
 
@@ -1029,6 +1031,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 layout,
                 retention,
                 successful: None,
+                successful_basis: Vec::new(),
                 pending: Some(publication.clone()),
             });
         }
@@ -1051,6 +1054,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 let before = self.workspace(&state.workspace).cloned();
                 if let Some(stored) = self.workspace_mut(&state.workspace) {
                     stored.successful = Some(furnished.clone());
+                    stored.successful_basis = stored
+                        .pending
+                        .as_ref()
+                        .map(|pending| pending.repository_states.0.clone())
+                        .unwrap_or_default();
                     stored.pending = None;
                 }
                 if let Err(error) = self.persist() {
@@ -1130,6 +1138,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     Ok(RecoveryOutcome::Finalized(furnished)) => {
                         if let Some(record) = self.workspace_mut(workspace) {
                             record.successful = Some(furnished.clone());
+                            record.successful_basis = record
+                                .pending
+                                .as_ref()
+                                .map(|pending| pending.repository_states.0.clone())
+                                .unwrap_or_default();
                             record.pending = None;
                         }
                         if self.persist().is_err() {

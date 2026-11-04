@@ -415,6 +415,37 @@ impl BeliefCore {
         self.workspaces.get(workspace)?.successful.as_ref()
     }
 
+    /// Restores a Memory-confirmed publication without rebuilding its old image
+    /// from today's repository snapshots.
+    pub fn restore_furnished(
+        &mut self,
+        request: wire::FurnishRequest,
+        furnished: wire::FurnishedWorkspace,
+        source_revisions: Vec<(wire::Repository, wire::SourceRevision)>,
+    ) -> bool {
+        if request.workspace != furnished.workspace {
+            return false;
+        }
+        let requested = deduplicate_preserving_order(request.module_name_vector);
+        self.workspaces.insert(
+            request.workspace,
+            WorkspaceRecord {
+                harness: request.harness,
+                requested,
+                successful: Some(SuccessfulPublication {
+                    generation_id: furnished.generation_id,
+                    publication_revision: furnished.publication_revision,
+                    source_revisions,
+                    placement: furnished.placement,
+                }),
+                last_found: furnished.found_vector,
+                last_missing: furnished.module_name_vector,
+                pending: None,
+            },
+        );
+        true
+    }
+
     pub fn requested(&self, workspace: &wire::Workspace) -> Option<&[wire::ModuleName]> {
         Some(&self.workspaces.get(workspace)?.requested)
     }
