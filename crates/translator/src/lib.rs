@@ -40,6 +40,8 @@ fn decode<T: datom_codec::Composing>(text: &str, limits: TextLimits) -> Result<T
     Potential::<T>::from(text).actualize(&mut budget).map_err(|error| TranslatorError::Text(format!("{error:?}")))
 }
 
+pub fn encode_public_query(query: &public::Query) -> String { shared_translator::encode(query) }
+pub fn encode_meta_query(query: &meta::Query) -> String { shared_translator::encode(query) }
 pub fn encode_public(response: &public::Response) -> String { shared_translator::encode(response) }
 pub fn encode_meta(response: &meta::Response) -> String { shared_translator::encode(response) }
 
@@ -66,9 +68,18 @@ pub fn restore_meta_response(bytes: Vec<u8>) -> Result<meta::Response, Translato
 }
 
 /// The emission lane is typed binary signal from end to end.
-pub fn execute_emission(bytes: Vec<u8>, executor: &FileEmission) -> Result<Vec<u8>, TranslatorError> {
-    let query = Signal::<emission_belief_nexus::Query>::from(bytes).restore().map_err(|error| TranslatorError::Signal(format!("{error:?}")))?;
-    archive(&executor.execute(query))
+pub fn execute_emission(bytes: Vec<u8>, caller: &public::Caller) -> Result<Vec<u8>, TranslatorError> {
+    let attempt = Signal::<emission_belief_nexus::EmissionAttempt>::from(bytes).restore().map_err(|error| TranslatorError::Signal(format!("{error:?}")))?;
+    let configuration = TranslatorConfiguration::from_snapshot(&attempt.translator_configuration)?;
+    if configuration.revision() != Some(&attempt.configuration_revision) {
+        return Err(TranslatorError::Configuration("emission attempt revision does not match its snapshot".into()));
+    }
+    let peers = configuration.allowed_nexus_peers().ok_or_else(|| TranslatorError::Configuration("emission attempt is awaiting allowed Nexus peers".into()))?;
+    admit_peer(caller.clone(), peers)?;
+    let git = configuration.git_executable().ok_or_else(|| TranslatorError::Configuration("emission attempt is awaiting Git executable".into()))?;
+    let executor = FileEmission::new(std::path::PathBuf::from(git)).map_err(TranslatorError::Configuration)?;
+    let outcome = emission_belief_nexus::EmissionAttemptOutcome { configuration_revision: attempt.configuration_revision, response: executor.execute(attempt.query) };
+    archive(&outcome)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,6 +132,22 @@ pub struct TranslatorConfiguration {
     transport_timeout: Option<meta::Timeout>,
     allowed_nexus_peers: Option<public::PeerList>,
     git_executable: Option<public::ExecutablePath>,
+    snapshot_ready: bool,
+}
+
+fn translator_set_missing(sets: &[meta::Set]) -> Vec<meta::SettingName> {
+    let required = [meta::SettingName::NexusSocket, meta::SettingName::MetaNexusSocket, meta::SettingName::CallTimeout, meta::SettingName::OutputLimit, meta::SettingName::TextBudget, meta::SettingName::TranslatorFrameCapacity, meta::SettingName::TranslatorTransportTimeout, meta::SettingName::AllowedNexusPeers, meta::SettingName::GitExecutable];
+    required.into_iter().filter(|name| !sets.iter().any(|set| setting_name_for_translator(set) == *name)).collect()
+}
+fn setting_name_for_translator(set: &meta::Set) -> meta::SettingName {
+    match set {
+        meta::Set::NexusSocket(_) => meta::SettingName::NexusSocket, meta::Set::MetaNexusSocket(_) => meta::SettingName::MetaNexusSocket,
+        meta::Set::CallTimeout(_) => meta::SettingName::CallTimeout, meta::Set::OutputLimit(_) => meta::SettingName::OutputLimit,
+        meta::Set::TextBudget(_) => meta::SettingName::TextBudget, meta::Set::TranslatorFrameCapacity(_) => meta::SettingName::TranslatorFrameCapacity,
+        meta::Set::TranslatorTransportTimeout(_) => meta::SettingName::TranslatorTransportTimeout, meta::Set::AllowedNexusPeers(_) => meta::SettingName::AllowedNexusPeers,
+        meta::Set::GitExecutable(_) => meta::SettingName::GitExecutable,
+        _ => meta::SettingName::RepositoryPolling,
+    }
 }
 
 impl TranslatorConfiguration {
@@ -138,6 +165,46 @@ impl TranslatorConfiguration {
             ..Self::default()
         })
     }
+    pub fn from_snapshot(snapshot: &meta::TranslatorConfiguration) -> Result<Self, TranslatorError> {
+        let mut configuration = Self::default();
+        let mut seen = std::collections::HashSet::new();
+        for set in &snapshot.set_vector {
+            if owner(set) != meta::Owner::Translator {
+                return Err(TranslatorError::Configuration("Nexus-owned setting in translator snapshot".into()));
+            }
+            let name = std::mem::discriminant(set);
+            if !seen.insert(name) {
+                return Err(TranslatorError::Configuration("duplicate translator setting".into()));
+            }
+            configuration.apply_set(set.clone())?;
+        }
+        configuration.revision = Some(snapshot.configuration_revision.clone());
+        configuration.snapshot_ready = matches!(snapshot.readiness, meta::Readiness::Ready);
+        let derived = if configuration.missing().is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(configuration.missing()) };
+        if derived != snapshot.readiness {
+            return Err(TranslatorError::Configuration("translator readiness is not derived from its settings".into()));
+        }
+        Ok(configuration)
+    }
+
+    pub fn restore(&mut self, snapshot: &meta::TranslatorConfiguration) -> Result<(), TranslatorError> {
+        let mut seen = std::collections::HashSet::new();
+        let mut candidate = self.clone();
+        for set in &snapshot.set_vector {
+            if owner(set) != meta::Owner::Translator || !seen.insert(std::mem::discriminant(set)) {
+                return Err(TranslatorError::Configuration("invalid translator configuration snapshot".into()));
+            }
+            candidate.apply_set(set.clone())?;
+        }
+        candidate.revision = Some(snapshot.configuration_revision.clone());
+        let stored_missing = translator_set_missing(&snapshot.set_vector);
+        let derived = if stored_missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(stored_missing) };
+        if derived != snapshot.readiness { return Err(TranslatorError::Configuration("translator readiness is not derived from its stored settings".into())); }
+        candidate.snapshot_ready = matches!(snapshot.readiness, meta::Readiness::Ready);
+        *self = candidate;
+        Ok(())
+    }
+
     pub fn revision(&self) -> Option<&meta::ConfigurationRevision> { self.revision.as_ref() }
 
     /// Apply only the authoritative Configured result. A skipped or repeated
@@ -152,6 +219,7 @@ impl TranslatorConfiguration {
             candidate.apply_set(configured.set.clone())?;
         }
         candidate.revision = Some(configured.configuration_revision.clone());
+        candidate.snapshot_ready = matches!(configured.readiness, meta::Readiness::Ready);
         *self = candidate;
         Ok(())
     }
@@ -172,8 +240,22 @@ impl TranslatorConfiguration {
         Ok(())
     }
 
+    fn missing(&self) -> Vec<meta::SettingName> {
+        let mut missing = Vec::new();
+        if self.nexus_socket.is_none() { missing.push(meta::SettingName::NexusSocket); }
+        if self.meta_nexus_socket.is_none() { missing.push(meta::SettingName::MetaNexusSocket); }
+        if self.call_timeout.is_none() { missing.push(meta::SettingName::CallTimeout); }
+        if self.output_limit.is_none() { missing.push(meta::SettingName::OutputLimit); }
+        if self.text_budget.is_none() { missing.push(meta::SettingName::TextBudget); }
+        if self.frame_capacity.is_none() { missing.push(meta::SettingName::TranslatorFrameCapacity); }
+        if self.transport_timeout.is_none() { missing.push(meta::SettingName::TranslatorTransportTimeout); }
+        if self.allowed_nexus_peers.is_none() { missing.push(meta::SettingName::AllowedNexusPeers); }
+        if self.git_executable.is_none() { missing.push(meta::SettingName::GitExecutable); }
+        missing
+    }
+
     pub fn ready(&self) -> bool {
-        self.nexus_socket.is_some() && self.meta_nexus_socket.is_some() && self.call_timeout.is_some()
+        self.snapshot_ready && self.nexus_socket.is_some() && self.meta_nexus_socket.is_some() && self.call_timeout.is_some()
             && self.output_limit.is_some() && self.text_budget.is_some() && self.frame_capacity.is_some()
             && self.transport_timeout.is_some() && self.allowed_nexus_peers.is_some()
             && self.git_executable.is_some()
@@ -303,30 +385,48 @@ pub fn serve_meta_text(
     let text = String::from_utf8(Vec::<u8>::from(body)).map_err(|error| TranslatorError::Text(error.to_string()))?;
     let query = decode_meta(&text, limits)?;
     let caller = observe_peer(stream, contract_digest)?;
-    let answer = forward_signal(Path::new(&target), archive(&meta::MetaCall { caller, query })?, capacity, timeout)?;
-    let response = restore_meta_response(answer)?;
-    if let meta::Response::Configured(state) = &response { configuration.apply(state)?; }
+    let output = meta_transport(Path::new(&target), meta::MetaTransportInput::Call(meta::MetaCall { caller, query }), capacity, timeout)?;
+    let mut response = match output {
+        meta::MetaTransportOutput::Answered(response) => response,
+        _ => return Err(TranslatorError::Signal("unexpected meta transport output".into())),
+    };
+    if let meta::Response::Configured(state) = &response {
+        if configuration.apply(state).is_err() {
+            match meta_transport(Path::new(&target), meta::MetaTransportInput::RestoreTranslatorConfiguration, capacity, timeout)? {
+                meta::MetaTransportOutput::Restored(snapshot) => configuration.restore(&snapshot)?,
+                _ => return Err(TranslatorError::Configuration("translator configuration restore refused".into())),
+            }
+            response = meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
+        }
+    }
     stream.write_frame(&signal::FrameBody::from(encode_meta(&response).into_bytes()), capacity).map_err(signal_error)
+}
+
+pub fn meta_transport(
+    socket: &Path,
+    input: meta::MetaTransportInput,
+    capacity: signal::FrameCapacity,
+    timeout: Duration,
+) -> Result<meta::MetaTransportOutput, TranslatorError> {
+    let bytes = archive(&input)?;
+    let answer = forward_signal(socket, bytes, capacity, timeout)?;
+    Signal::<meta::MetaTransportOutput>::from(answer).restore().map_err(|error| TranslatorError::Signal(format!("{error:?}")))
 }
 
 /// Serve one binary emission request from the configured live Nexus peer.
 pub fn serve_emission(
     stream: &mut UnixStream,
-    configuration: &TranslatorConfiguration,
+    capacity: signal::FrameCapacity,
     expected_process: &meta::PairedProcess,
     contract_digest: public::ContractDigest,
-    executor: &FileEmission,
 ) -> Result<(), TranslatorError> {
     use signal::{FrameReading, FrameWriting};
-    let capacity = configuration.frame_capacity().ok_or_else(|| TranslatorError::Configuration("translator is awaiting frame capacity".into()))?;
     let caller = observe_peer(stream, contract_digest)?;
     if caller.user_id != expected_process.user_id || caller.group_id != expected_process.group_id || caller.process_id != expected_process.process_id {
         return Err(TranslatorError::Peer("caller is not the paired Nexus process".into()));
     }
-    let peers = configuration.allowed_nexus_peers().ok_or_else(|| TranslatorError::Configuration("translator is awaiting allowed Nexus peers".into()))?;
-    admit_peer(caller, peers)?;
     let request = Vec::<u8>::from(stream.read_frame(capacity).map_err(signal_error)?);
-    let answer = execute_emission(request, executor)?;
+    let answer = execute_emission(request, &caller)?;
     stream.write_frame(&signal::FrameBody::from(answer), capacity).map_err(signal_error)
 }
 
@@ -350,7 +450,40 @@ impl std::error::Error for TranslatorError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+
+    fn complete_snapshot(revision: i64, caller: &public::Caller) -> meta::TranslatorConfiguration {
+        let peer = public::PeerIdentity {
+            peer_name: public::PeerName("nexus".into()), user_id: caller.user_id.clone(),
+            group_id: caller.group_id.clone(), executable_path: caller.executable_path.clone(),
+            contract_digest: caller.contract_digest.clone(),
+        };
+        meta::TranslatorConfiguration {
+            configuration_revision: meta::ConfigurationRevision(revision),
+            set_vector: vec![
+                meta::Set::NexusSocket(meta::SocketPath("ordinary".into())),
+                meta::Set::MetaNexusSocket(meta::SocketPath("meta".into())),
+                meta::Set::CallTimeout(meta::Timeout(100)),
+                meta::Set::OutputLimit(meta::ByteLimit(1000)),
+                meta::Set::TextBudget(meta::Budget { node_limit: meta::NodeLimit(1000), depth_limit: meta::DepthLimit(100) }),
+                meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1000)),
+                meta::Set::TranslatorTransportTimeout(meta::Timeout(100)),
+                meta::Set::AllowedNexusPeers(public::PeerList(vec![peer])),
+                meta::Set::GitExecutable(public::ExecutablePath("git".into())),
+            ],
+            readiness: meta::Readiness::Ready,
+        }
+    }
+
+    fn current_caller() -> public::Caller {
+        let executable = std::fs::canonicalize("/proc/self/exe").unwrap();
+        public::Caller {
+            user_id: public::UserId(i64::from(nix::unistd::getuid().as_raw())),
+            group_id: public::GroupId(i64::from(nix::unistd::getgid().as_raw())),
+            process_id: public::ProcessId(i64::from(std::process::id())),
+            executable_path: public::ExecutablePath(executable.to_string_lossy().into_owned()),
+            contract_digest: public::ContractDigest("emission".into()),
+        }
+    }
 
     #[test]
     fn ordinary_and_meta_text_round_trip() {
@@ -398,10 +531,46 @@ mod tests {
 
     #[test]
     fn emission_lane_is_binary_signal_only() {
-        let executor = FileEmission::new(PathBuf::from("git")).unwrap();
+        let caller = current_caller();
+        let revision = meta::ConfigurationRevision(1);
         let query = emission_belief_nexus::Query::Snapshot(public::Repository(public::RepositoryPath("/definitely/missing".into())));
-        let answer = execute_emission(archive(&query).unwrap(), &executor).unwrap();
-        let response = Signal::<emission_belief_nexus::Response>::from(answer).restore().unwrap();
-        assert!(matches!(response, emission_belief_nexus::Response::EmissionRefused(_)));
+        let attempt = emission_belief_nexus::EmissionAttempt { configuration_revision: revision, translator_configuration: complete_snapshot(1, &caller), query };
+        let answer = execute_emission(archive(&attempt).unwrap(), &caller).unwrap();
+        let outcome = Signal::<emission_belief_nexus::EmissionAttemptOutcome>::from(answer).restore().unwrap();
+        assert!(matches!(outcome.response, emission_belief_nexus::Response::EmissionRefused(_)));
+    }
+
+    #[test]
+    fn old_attempt_keeps_its_snapshot_across_reconfiguration() {
+        let caller = current_caller();
+        let query = emission_belief_nexus::Query::Snapshot(public::Repository(public::RepositoryPath("/definitely/missing".into())));
+        let old = emission_belief_nexus::EmissionAttempt {
+            configuration_revision: meta::ConfigurationRevision(7),
+            translator_configuration: complete_snapshot(7, &caller), query,
+        };
+        // A later ingress configuration exists independently. The admitted
+        // attempt remains wholly described by the immutable snapshot it carries.
+        let mut current = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+        assert_eq!(current.revision(), Some(&meta::ConfigurationRevision(8)));
+        current.snapshot_ready = false;
+        let answer = execute_emission(archive(&old).unwrap(), &caller).unwrap();
+        let outcome = Signal::<emission_belief_nexus::EmissionAttemptOutcome>::from(answer).restore().unwrap();
+        assert_eq!(outcome.configuration_revision, meta::ConfigurationRevision(7));
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_nexus_owned_and_false_readiness() {
+        let caller = current_caller();
+        let mut duplicate = complete_snapshot(1, &caller);
+        duplicate.set_vector.push(meta::Set::CallTimeout(meta::Timeout(200)));
+        assert!(TranslatorConfiguration::from_snapshot(&duplicate).is_err());
+
+        let mut nexus_owned = complete_snapshot(1, &caller);
+        nexus_owned.set_vector.push(meta::Set::RepositoryPolling(meta::Timeout(10)));
+        assert!(TranslatorConfiguration::from_snapshot(&nexus_owned).is_err());
+
+        let mut false_readiness = complete_snapshot(1, &caller);
+        false_readiness.set_vector.pop();
+        assert!(TranslatorConfiguration::from_snapshot(&false_readiness).is_err());
     }
 }

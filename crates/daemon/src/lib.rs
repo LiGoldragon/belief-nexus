@@ -123,6 +123,26 @@ fn setting_name(set: &meta::Set) -> meta::SettingName {
     }
 }
 
+fn setting_owner(set: &meta::Set) -> meta::Owner {
+    match set {
+        meta::Set::NexusSocket(_) | meta::Set::MetaNexusSocket(_) | meta::Set::CallTimeout(_)
+        | meta::Set::OutputLimit(_) | meta::Set::TextBudget(_) | meta::Set::TranslatorFrameCapacity(_)
+        | meta::Set::TranslatorTransportTimeout(_) | meta::Set::AllowedNexusPeers(_)
+        | meta::Set::GitExecutable(_) => meta::Owner::Translator,
+        _ => meta::Owner::Nexus,
+    }
+}
+
+fn emission_mismatch(query: &emission::Query) -> emission::Response {
+    let diagnostic = wire::Diagnostic { executable_path: wire::ExecutablePath(String::new()), exit_status_option: None, string: "emission outcome configuration revision mismatch".into() };
+    match query {
+        emission::Query::Snapshot(repository) => emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal { repository: repository.clone(), source_operation: emission::SourceOperation::ReadingMain, source_evidence: emission::SourceEvidence::Translator(diagnostic) })),
+        emission::Query::Publish(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::StagingGeneration, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
+        emission::Query::InspectPublication(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::InspectingPointer, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
+        emission::Query::Clean(value) => emission::Response::CleanupRefused(wire::FileFailure { workspace: value.workspace.clone(), file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::Translator(diagnostic) }),
+    }
+}
+
 fn resolve_refusal(error: ResolveError) -> wire::Refusal {
     match error {
         ResolveError::Ambiguous { name, repositories } => {
@@ -224,36 +244,27 @@ mod tests {
     }
 
     impl EmissionPort for FakeEffects {
-        fn emit(&mut self, query: emission::Query) -> emission::Response {
+        fn emit(&mut self, attempt: emission::EmissionAttempt) -> emission::EmissionAttemptOutcome {
+            let revision = attempt.configuration_revision;
+            let query = attempt.query;
             self.calls.push(query.clone());
-            if let Some(reply) = self.replies.pop_front() {
-                return reply;
-            }
-            match query {
-                emission::Query::Publish(publication) if self.publish_from_query => {
-                    emission::Response::Published(emission::PublicationState {
-                        workspace: publication.workspace,
-                        generation_id: publication.generation_id,
+            let response = if let Some(reply) = self.replies.pop_front() {
+                reply
+            } else {
+                match query {
+                    emission::Query::Publish(publication) if self.publish_from_query => emission::Response::Published(emission::PublicationState {
+                        workspace: publication.workspace, generation_id: publication.generation_id,
                         publication_revision: publication.intended_publication.0,
-                    })
+                    }),
+                    emission::Query::Clean(request) if self.cleanup_failures > 0 => {
+                        self.cleanup_failures -= 1;
+                        emission::Response::CleanupRefused(wire::FileFailure { workspace: request.workspace, file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::PermissionDenied })
+                    }
+                    emission::Query::Clean(request) => emission::Response::Cleaned(emission::CleanupState { workspace: request.workspace, generation_id: request.generation_id, cleanup_outcome: emission::CleanupOutcome::Removed }),
+                    _ => panic!("missing effect reply"),
                 }
-                emission::Query::Clean(request) if self.cleanup_failures > 0 => {
-                    self.cleanup_failures -= 1;
-                    emission::Response::CleanupRefused(wire::FileFailure {
-                        workspace: request.workspace,
-                        file_operation: wire::FileOperation::Cleaning,
-                        file_evidence: wire::FileEvidence::PermissionDenied,
-                    })
-                }
-                emission::Query::Clean(request) => {
-                    emission::Response::Cleaned(emission::CleanupState {
-                        workspace: request.workspace,
-                        generation_id: request.generation_id,
-                        cleanup_outcome: emission::CleanupOutcome::Removed,
-                    })
-                }
-                _ => panic!("missing effect reply"),
-            }
+            };
+            emission::EmissionAttemptOutcome { configuration_revision: revision, response }
         }
     }
 
@@ -346,9 +357,22 @@ mod tests {
                 repository_polling: Some(meta::Timeout(100)),
                 subscriber_capacity: Some(1),
                 ordinary_peers: Some(wire::PeerList(vec![peer.clone()])),
-                meta_peers: Some(wire::PeerList(vec![peer])),
+                meta_peers: Some(wire::PeerList(vec![peer.clone()])),
                 layout: Some(layout()),
                 retention: meta::RetentionPolicy::KeepAll,
+                nexus_frame_capacity: Some(meta::ByteLimit(1_000_000)),
+                nexus_transport_timeout: Some(meta::Timeout(100)),
+                translator_sets: vec![
+                    meta::Set::NexusSocket(meta::SocketPath("ordinary".into())),
+                    meta::Set::MetaNexusSocket(meta::SocketPath("meta".into())),
+                    meta::Set::CallTimeout(meta::Timeout(100)),
+                    meta::Set::OutputLimit(meta::ByteLimit(1_000_000)),
+                    meta::Set::TextBudget(meta::Budget { node_limit: meta::NodeLimit(1000), depth_limit: meta::DepthLimit(100) }),
+                    meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1_000_000)),
+                    meta::Set::TranslatorTransportTimeout(meta::Timeout(100)),
+                    meta::Set::AllowedNexusPeers(wire::PeerList(vec![peer.clone()])),
+                    meta::Set::GitExecutable(wire::ExecutablePath("git".into())),
+                ],
             },
             repositories: Vec::new(),
             workspaces: Vec::new(),
@@ -726,7 +750,7 @@ impl MemoryStore for FileMemory {
 }
 
 pub trait EmissionPort {
-    fn emit(&mut self, query: emission::Query) -> emission::Response;
+    fn emit(&mut self, attempt: emission::EmissionAttempt) -> emission::EmissionAttemptOutcome;
 }
 
 #[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -738,6 +762,9 @@ pub struct Configuration {
     pub meta_peers: Option<wire::PeerList>,
     pub layout: Option<meta::Layout>,
     pub retention: meta::RetentionPolicy,
+    pub nexus_frame_capacity: Option<meta::ByteLimit>,
+    pub nexus_transport_timeout: Option<meta::Timeout>,
+    pub translator_sets: Vec<meta::Set>,
 }
 
 impl Configuration {
@@ -750,6 +777,9 @@ impl Configuration {
             meta_peers: None,
             layout: None,
             retention: meta::RetentionPolicy::KeepAll,
+            nexus_frame_capacity: None,
+            nexus_transport_timeout: None,
+            translator_sets: Vec::new(),
         }
     }
 
@@ -770,7 +800,30 @@ impl Configuration {
         if self.layout.is_none() {
             missing.push(meta::SettingName::Layout(empty_layout()));
         }
+        if self.nexus_frame_capacity.is_none() { missing.push(meta::SettingName::NexusFrameCapacity); }
+        if self.nexus_transport_timeout.is_none() { missing.push(meta::SettingName::NexusTransportTimeout); }
+        missing.extend(self.translator_missing());
         missing
+    }
+
+    fn translator_missing(&self) -> Vec<meta::SettingName> {
+        let required = [
+            meta::SettingName::NexusSocket, meta::SettingName::MetaNexusSocket,
+            meta::SettingName::CallTimeout, meta::SettingName::OutputLimit,
+            meta::SettingName::TextBudget, meta::SettingName::TranslatorFrameCapacity,
+            meta::SettingName::TranslatorTransportTimeout, meta::SettingName::AllowedNexusPeers,
+            meta::SettingName::GitExecutable,
+        ];
+        required.into_iter().filter(|name| !self.translator_sets.iter().any(|set| &setting_name(set) == name)).collect()
+    }
+
+    fn translator_configuration(&self) -> meta::TranslatorConfiguration {
+        let missing = self.translator_missing();
+        meta::TranslatorConfiguration {
+            configuration_revision: self.revision.clone(),
+            set_vector: self.translator_sets.clone(),
+            readiness: if missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(missing) },
+        }
     }
 
     fn readiness(&self) -> meta::Readiness {
@@ -899,6 +952,17 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         Ok(daemon)
     }
 
+    fn emit_effect(&mut self, query: emission::Query) -> emission::Response {
+        let revision = self.memory.configuration.revision.clone();
+        let attempt = emission::EmissionAttempt {
+            configuration_revision: revision.clone(),
+            translator_configuration: self.memory.configuration.translator_configuration(),
+            query: query.clone(),
+        };
+        let outcome = self.effects.emit(attempt);
+        if outcome.configuration_revision == revision { outcome.response } else { emission_mismatch(&query) }
+    }
+
     pub fn handle(&mut self, call: wire::Call) -> wire::Response {
         if !self.authorized_ordinary(&call.caller) {
             return wire::Response::Refused(wire::Refusal::NotAuthorized(call.caller));
@@ -1005,27 +1069,36 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             meta::Set::GenerationRetention(value) => {
                 self.memory.configuration.retention = value.clone()
             }
-            _ => {
-                return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Invalid(
-                    meta::Invalid {
-                        owner: meta::Owner::Translator,
-                        setting_name: setting_name(&set),
-                        string: "translator-owned setting".into(),
-                    },
-                ));
+            meta::Set::NexusFrameCapacity(value) => self.memory.configuration.nexus_frame_capacity = Some(value.clone()),
+            meta::Set::NexusTransportTimeout(value) => self.memory.configuration.nexus_transport_timeout = Some(value.clone()),
+            _ if setting_owner(&set) == meta::Owner::Translator => {
+                let name = setting_name(&set);
+                self.memory.configuration.translator_sets.retain(|current| setting_name(current) != name);
+                self.memory.configuration.translator_sets.push(set.clone());
             }
+            _ => unreachable!("all Nexus-owned settings are handled above"),
         }
         self.memory.configuration.revision.0 += 1;
         if self.persist().is_err() {
             self.memory.configuration = previous;
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
         }
+        let owner = setting_owner(&set);
         meta::Response::Configured(meta::ConfiguredState {
             set,
-            owner: meta::Owner::Nexus,
+            owner,
             configuration_revision: self.memory.configuration.revision.clone(),
             readiness: self.memory.configuration.readiness(),
         })
+    }
+
+    pub fn meta_transport(&mut self, input: meta::MetaTransportInput) -> meta::MetaTransportOutput {
+        match input {
+            meta::MetaTransportInput::Call(call) => meta::MetaTransportOutput::Answered(self.configure(call)),
+            meta::MetaTransportInput::RestoreTranslatorConfiguration => {
+                meta::MetaTransportOutput::Restored(self.memory.configuration.translator_configuration())
+            }
+        }
     }
 
     pub fn recover_pending(&mut self) -> Vec<wire::Response> {
@@ -1056,9 +1129,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             })
             .collect();
         for (repository, old_revision) in repositories {
-            match self
-                .effects
-                .emit(emission::Query::Snapshot(repository.clone()))
+            match self.emit_effect(emission::Query::Snapshot(repository.clone()))
             {
                 emission::Response::Snapshotted(snapshot)
                     if snapshot.source_revision == old_revision => {}
@@ -1132,9 +1203,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         {
             return wire::Response::Refused(wire::Refusal::NotAuthorized(owner));
         }
-        let first = match self
-            .effects
-            .emit(emission::Query::Snapshot(repository.clone()))
+        let first = match self.emit_effect(emission::Query::Snapshot(repository.clone()))
         {
             emission::Response::Snapshotted(snapshot) => snapshot,
             emission::Response::EmissionRefused(refusal) => {
@@ -1146,9 +1215,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             return wire::Response::Refused(memory_refusal(wire::MemoryOperation::Recording));
         }
         // Immediate next observation closes the register/watch handoff window.
-        if let emission::Response::Snapshotted(next) = self
-            .effects
-            .emit(emission::Query::Snapshot(repository.clone()))
+        if let emission::Response::Snapshotted(next) = self.emit_effect(emission::Query::Snapshot(repository.clone()))
         {
             if next.source_revision != first.source_revision {
                 self.apply_snapshot(next);
@@ -1272,7 +1339,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     fn publish(&mut self, publication: emission::Publication) -> wire::Response {
-        match self.effects.emit(emission::Query::Publish(publication)) {
+        match self.emit_effect(emission::Query::Publish(publication)) {
             emission::Response::Published(state) => {
                 let furnished = match self.core.complete_publication(&state) {
                     Ok(furnished) => furnished,
@@ -1399,7 +1466,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             generation_id: maintenance.generation_id.clone(),
             layout: stored.layout,
         };
-        match self.effects.emit(emission::Query::Clean(request)) {
+        match self.emit_effect(emission::Query::Clean(request)) {
             emission::Response::Cleaned(state)
                 if state.workspace == maintenance.workspace
                     && state.generation_id == maintenance.generation_id =>
@@ -1431,7 +1498,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
 
     fn recover_one(&mut self, workspace: &wire::Workspace) -> Option<wire::Response> {
         let stored = self.workspace(workspace)?.clone();
-        let response = self.effects.emit(emission::Query::InspectPublication(
+        let response = self.emit_effect(emission::Query::InspectPublication(
             emission::InspectionRequest {
                 workspace: workspace.clone(),
                 layout: stored.layout.clone(),

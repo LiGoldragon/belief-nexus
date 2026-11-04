@@ -18,3 +18,4 @@ signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexu
 
 [dev-dependencies]
 tempfile = "3"
+belief-nexus-translator = { path = "../translator" }

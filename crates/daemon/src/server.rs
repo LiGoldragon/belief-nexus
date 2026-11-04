@@ -33,9 +33,12 @@ impl SocketEmission {
 }
 
 impl EmissionPort for SocketEmission {
-    fn emit(&mut self, query: emission::Query) -> emission::Response {
-        let fallback = emission_failure(&query);
-        let Ok(signal) = query.signalize() else {
+    fn emit(&mut self, attempt: emission::EmissionAttempt) -> emission::EmissionAttemptOutcome {
+        let fallback = emission::EmissionAttemptOutcome {
+            configuration_revision: attempt.configuration_revision.clone(),
+            response: emission_failure(&attempt.query),
+        };
+        let Ok(signal) = attempt.signalize() else {
             return fallback;
         };
         let Ok(mut stream) = UnixStream::connect(&self.socket) else {
@@ -52,7 +55,7 @@ impl EmissionPort for SocketEmission {
         let Ok(body) = stream.read_frame(self.capacity) else {
             return fallback;
         };
-        Signal::<emission::Response>::from(Vec::<u8>::from(body))
+        Signal::<emission::EmissionAttemptOutcome>::from(Vec::<u8>::from(body))
             .restore()
             .unwrap_or(fallback)
     }
@@ -224,11 +227,11 @@ fn serve_meta(
     configure_stream(&stream, admission)?;
     let capacity = capacity(admission);
     let body = stream.read_frame(capacity).map_err(frame_error)?;
-    let call = Signal::<meta::MetaCall>::from(Vec::<u8>::from(body))
+    let input = Signal::<meta::MetaTransportInput>::from(Vec::<u8>::from(body))
         .restore()
         .map_err(restore_error)?;
-    let response = daemon.lock().map_err(lock_error)?.configure(call);
-    write_signal(&mut stream, &response, capacity)
+    let output = daemon.lock().map_err(lock_error)?.meta_transport(input);
+    write_signal(&mut stream, &output, capacity)
 }
 
 fn poll(daemon: Arc<Mutex<Daemon<SocketEmission, FileMemory>>>, stop: Arc<AtomicBool>) {
@@ -424,12 +427,25 @@ mod tests {
             meta::Set::RepositoryPolling(meta::Timeout(20)),
             meta::Set::SubscriberCapacity(2),
             meta::Set::OrdinaryPeers(wire::PeerList(vec![identity.clone()])),
+            meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
             meta::Set::Layout(layout),
+            meta::Set::GenerationRetention(meta::RetentionPolicy::KeepAll),
+            meta::Set::NexusFrameCapacity(meta::ByteLimit(1_000_000)),
+            meta::Set::NexusTransportTimeout(meta::Timeout(1_000)),
+            meta::Set::NexusSocket(meta::SocketPath(ordinary.to_string_lossy().into_owned())),
+            meta::Set::MetaNexusSocket(meta::SocketPath(privileged.to_string_lossy().into_owned())),
+            meta::Set::CallTimeout(meta::Timeout(1_000)),
+            meta::Set::OutputLimit(meta::ByteLimit(1_000_000)),
+            meta::Set::TextBudget(meta::Budget { node_limit: meta::NodeLimit(10_000), depth_limit: meta::DepthLimit(100) }),
+            meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1_000_000)),
+            meta::Set::TranslatorTransportTimeout(meta::Timeout(1_000)),
+            meta::Set::AllowedNexusPeers(wire::PeerList(vec![identity.clone()])),
+            meta::Set::GitExecutable(wire::ExecutablePath("git".into())),
         ];
         for (revision, set) in sets.into_iter().enumerate() {
-            let response: meta::Response = exchange(
+            let response: meta::MetaTransportOutput = exchange(
                 &privileged,
-                &meta::MetaCall {
+                &meta::MetaTransportInput::Call(meta::MetaCall {
                     caller: caller.clone(),
                     query: meta::Query::Configure(meta::ConfigureRequest {
                         configuration_revision_option: Some(meta::ConfigurationRevision(
@@ -437,9 +453,9 @@ mod tests {
                         )),
                         set,
                     }),
-                },
+                }),
             );
-            assert!(matches!(response, meta::Response::Configured(_)));
+            assert!(matches!(response, meta::MetaTransportOutput::Answered(meta::Response::Configured(_))));
         }
         let response: wire::Response = exchange(
             &ordinary,

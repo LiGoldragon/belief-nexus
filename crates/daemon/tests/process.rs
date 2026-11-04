@@ -96,17 +96,17 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
         }
         thread::sleep(Duration::from_millis(5));
     }
-    let response: meta::Response = exchange(
+    let response: meta::MetaTransportOutput = exchange(
         &privileged,
-        &meta::MetaCall {
+        &meta::MetaTransportInput::Call(meta::MetaCall {
             caller: caller.clone(),
             query: meta::Query::Configure(meta::ConfigureRequest {
                 configuration_revision_option: Some(meta::ConfigurationRevision(0)),
                 set: meta::Set::RepositoryPolling(meta::Timeout(20)),
             }),
-        },
+        }),
     );
-    assert!(matches!(response, meta::Response::Configured(_)));
+    assert!(matches!(response, meta::MetaTransportOutput::Answered(meta::Response::Configured(_))));
     let response: wire::Response = exchange(
         &ordinary,
         &wire::Call {
