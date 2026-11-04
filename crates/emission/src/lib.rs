@@ -979,6 +979,18 @@ mod tests {
         }
     }
 
+    fn claude_layout() -> Layout {
+        Layout {
+            owned_root: OwnedRoot(RelativePath(".belief".into())),
+            generations_directory: GenerationsDirectory(RelativePath("generations".into())),
+            current_link: CurrentLink(RelativePath("current".into())),
+            settings_file: SettingsFile(RelativePath("CLAUDE.md".into())),
+            instructions_setting: InstructionsSetting("unused-for-claude".into()),
+            instructions_file: InstructionsFile(RelativePath("CLAUDE.md".into())),
+            skills_directory: SkillsDirectory(RelativePath(".claude/skills".into())),
+        }
+    }
+
     fn publication(root: &Path, generation: &str, prior: Option<i64>, intended: i64, instruction: &str, skills: Vec<SkillFile>) -> Publication {
         Publication {
             workspace: Workspace(WorkspacePath(root.to_string_lossy().into_owned())),
@@ -1107,6 +1119,43 @@ mod tests {
         assert_eq!(manifest.intended_publication, IntendedPublication(PublicationRevision(2)));
         assert_eq!(manifest.repository_states.0.len(), 1);
         assert_eq!(manifest.found_modules.0.len(), 1);
+    }
+
+    #[test]
+    fn claude_publication_installs_only_owned_capability_links() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(workspace.path().join("unrelated.txt"), "keep").unwrap();
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let mut first = publication(
+            workspace.path(), "claude-one", None, 1, "claude instructions",
+            vec![SkillFile { relative_path: RelativePath("witness/SKILL.md".into()), content: Content("claude skill".into()) }],
+        );
+        first.workspace_image.harness = signal_belief_nexus::Harness::Claude;
+        first.workspace_image.layout = claude_layout();
+        assert!(matches!(emission.execute(Query::Publish(first)), Response::Published(_)));
+        assert_eq!(fs::read_link(workspace.path().join("CLAUDE.md")).unwrap(), workspace.path().join(".belief/current/CLAUDE.md"));
+        assert_eq!(fs::read_link(workspace.path().join(".claude/skills")).unwrap(), workspace.path().join(".belief/current/skills"));
+        assert_eq!(fs::read_to_string(workspace.path().join("CLAUDE.md")).unwrap(), "claude instructions");
+        assert_eq!(fs::read_to_string(workspace.path().join(".claude/skills/witness/SKILL.md")).unwrap(), "claude skill");
+        assert_eq!(fs::read_to_string(workspace.path().join("unrelated.txt")).unwrap(), "keep");
+
+        let foreign = tempfile::tempdir().unwrap();
+        fs::write(foreign.path().join("CLAUDE.md"), "foreign").unwrap();
+        let mut refused = publication(foreign.path(), "claude-one", None, 1, "ours", vec![]);
+        refused.workspace_image.harness = signal_belief_nexus::Harness::Claude;
+        refused.workspace_image.layout = claude_layout();
+        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(_)));
+        assert_eq!(fs::read_to_string(foreign.path().join("CLAUDE.md")).unwrap(), "foreign");
+        assert!(!foreign.path().join(".belief/current").exists());
+
+        let foreign_skills = tempfile::tempdir().unwrap();
+        fs::create_dir_all(foreign_skills.path().join(".claude/skills")).unwrap();
+        fs::write(foreign_skills.path().join(".claude/skills/keep"), "foreign").unwrap();
+        let mut refused = publication(foreign_skills.path(), "claude-one", None, 1, "ours", vec![]);
+        refused.workspace_image.harness = signal_belief_nexus::Harness::Claude;
+        refused.workspace_image.layout = claude_layout();
+        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(_)));
+        assert_eq!(fs::read_to_string(foreign_skills.path().join(".claude/skills/keep")).unwrap(), "foreign");
     }
 
     #[test]
