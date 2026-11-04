@@ -51,6 +51,8 @@ Signal
                          PriorRevisionMismatch.RevisionEvidence
                          OwnedPointerMismatch
                          ManifestMismatch
+                         SettingsConflict
+                         InvalidSettings
                          PermissionDenied
                          Translator.Diagnostic ]
   PublicationRefusal.{ Workspace PublicationOperation PublicationEvidence }

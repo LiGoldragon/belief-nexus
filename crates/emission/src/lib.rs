@@ -220,6 +220,8 @@ pub enum PublicationEvidence {
     PriorRevisionMismatch(RevisionEvidence),
     OwnedPointerMismatch,
     ManifestMismatch,
+    SettingsConflict,
+    InvalidSettings,
     PermissionDenied,
     Translator(signal_belief_nexus::Diagnostic),
 }
@@ -584,6 +586,7 @@ impl PublicationPaths {
                 return Err(boundary(&self.workspace, &self.skills_link));
             }
         }
+        let _ = self.rendered_settings(publication)?;
         for skill in &publication.workspace_image.skill_file_vector {
             let relative = safe_relative(&skill.relative_path.0)?;
             let candidate = self.generations.join(&publication.generation_id.0).join("skills").join(relative);
@@ -614,20 +617,36 @@ impl PublicationPaths {
     }
 
     fn write_settings(&self, publication: &Publication) -> Result<(), PublicationEvidence> {
+        let Some(rendered) = self.rendered_settings(publication)? else { return Ok(()) };
+        atomic_file(&self.settings, rendered.as_bytes()).map_err(|error| io_evidence(&self.settings, error))
+    }
+
+    fn rendered_settings(&self, publication: &Publication) -> Result<Option<String>, PublicationEvidence> {
         let existing = match fs::read_to_string(&self.settings) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(io_evidence(&self.settings, error)),
         };
         let mut document = existing.parse::<toml_edit::DocumentMut>()
-            .map_err(|_| PublicationEvidence::PermissionDenied)?;
+            .map_err(|_| PublicationEvidence::InvalidSettings)?;
         let key = &publication.workspace_image.layout.instructions_setting.0;
-        if key.is_empty() { return Err(PublicationEvidence::PermissionDenied); }
+        if key.is_empty() { return Err(PublicationEvidence::InvalidSettings); }
         let value = format!("{}/{}", relative_from(&self.workspace, &self.current), self.instructions.to_string_lossy());
-        document[key] = toml_edit::value(value);
+        let marker = format!("{key}_belief_nexus_managed");
+        match document.get(key) {
+            None => {
+                if document.get(&marker).is_some() { return Err(PublicationEvidence::SettingsConflict); }
+                document[key] = toml_edit::value(value.clone());
+                document[&marker] = toml_edit::value(value);
+            }
+            Some(item) => {
+                let owned_value = item.as_str() == Some(value.as_str())
+                    && document.get(&marker).and_then(toml_edit::Item::as_str) == Some(value.as_str());
+                if !owned_value { return Err(PublicationEvidence::SettingsConflict); }
+            }
+        }
         let rendered = document.to_string();
-        if rendered == existing { return Ok(()); }
-        atomic_file(&self.settings, rendered.as_bytes()).map_err(|error| io_evidence(&self.settings, error))
+        if rendered == existing { Ok(None) } else { Ok(Some(rendered)) }
     }
 
     fn stage_generation(&self, publication: &Publication, generation: &Path, manifest: &PublicationManifest) -> Result<(), PublicationEvidence> {
@@ -663,6 +682,13 @@ impl PublicationPaths {
     }
 
     fn replace_current(&self, publication: &Publication, generation: &Path) -> Result<(), PublicationEvidence> {
+        let observed = self.inspect_current(publication)?.map(|(_, manifest)| manifest.intended_publication.0);
+        if observed != publication.prior_publication.0 {
+            return Err(PublicationEvidence::PriorRevisionMismatch(RevisionEvidence {
+                expected_revision: ExpectedRevision(publication.prior_publication.0.clone()),
+                observed_revision: ObservedRevision(observed),
+            }));
+        }
         let relative = generation.strip_prefix(&self.owned).map_err(|_| boundary(&self.owned, generation))?;
         let temporary = self.owned.join(format!(".current-{}-{}", publication.generation_id.0, std::process::id()));
         symlink(relative, &temporary).map_err(|error| io_evidence(&temporary, error))?;
@@ -730,6 +756,9 @@ fn cleanup_failure(workspace: &signal_belief_nexus::Workspace, evidence: Publica
             second_publication_revision_option: value.observed_revision.0,
         }),
         PublicationEvidence::OwnedPointerMismatch | PublicationEvidence::ManifestMismatch => FileEvidence::Conflict(signal_belief_nexus::Conflict_Data {
+            first_publication_revision_option: None, second_publication_revision_option: None,
+        }),
+        PublicationEvidence::SettingsConflict | PublicationEvidence::InvalidSettings => FileEvidence::Conflict(signal_belief_nexus::Conflict_Data {
             first_publication_revision_option: None, second_publication_revision_option: None,
         }),
         PublicationEvidence::PermissionDenied => FileEvidence::PermissionDenied,
@@ -991,6 +1020,57 @@ mod tests {
         assert_eq!(manifest.intended_publication, IntendedPublication(PublicationRevision(2)));
         assert_eq!(manifest.repository_states.0.len(), 1);
         assert_eq!(manifest.found_modules.0.len(), 1);
+    }
+
+    #[test]
+    fn publication_preserves_foreign_current_and_settings_ownership() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+
+        let regular = tempfile::tempdir().unwrap();
+        fs::create_dir_all(regular.path().join(".belief")).unwrap();
+        fs::write(regular.path().join(".belief/current"), "foreign").unwrap();
+        let response = emission.execute(Query::Publish(publication(regular.path(), "one", None, 1, "instructions", vec![])));
+        assert!(matches!(response, Response::EmissionRefused(_)));
+        assert_eq!(fs::read_to_string(regular.path().join(".belief/current")).unwrap(), "foreign");
+
+        let linked = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(linked.path().join(".belief")).unwrap();
+        symlink(outside.path(), linked.path().join(".belief/current")).unwrap();
+        let response = emission.execute(Query::Publish(publication(linked.path(), "one", None, 1, "instructions", vec![])));
+        assert!(matches!(response, Response::EmissionRefused(_)));
+        assert_eq!(fs::read_link(linked.path().join(".belief/current")).unwrap(), outside.path());
+
+        for existing in [
+            "model_instructions_file = \".belief/current/model-instructions.md\"\n",
+            "model_instructions_file = \"foreign.md\"\n",
+            "model_instructions_file = [\n",
+        ] {
+            let workspace = tempfile::tempdir().unwrap();
+            fs::create_dir_all(workspace.path().join(".codex")).unwrap();
+            fs::write(workspace.path().join(".codex/config.toml"), existing).unwrap();
+            let response = emission.execute(Query::Publish(publication(workspace.path(), "one", None, 1, "instructions", vec![])));
+            assert!(matches!(response, Response::EmissionRefused(_)));
+            assert_eq!(fs::read_to_string(workspace.path().join(".codex/config.toml")).unwrap(), existing);
+            assert!(!workspace.path().join(".belief/current").exists());
+        }
+    }
+
+    #[test]
+    fn settings_merge_preserves_unrelated_nested_toml_exactly() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::create_dir_all(workspace.path().join(".codex")).unwrap();
+        let unrelated = "model = \"gpt-test\" # keep comment\n[nested]\narray = [1, 2, 3]\ninline = { answer = 42 }\n";
+        fs::write(workspace.path().join(".codex/config.toml"), unrelated).unwrap();
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        assert!(matches!(emission.execute(Query::Publish(publication(workspace.path(), "one", None, 1, "instructions", vec![]))), Response::Published(_)));
+        let rendered = fs::read_to_string(workspace.path().join(".codex/config.toml")).unwrap();
+        assert!(rendered.contains("model = \"gpt-test\" # keep comment\n"));
+        assert!(rendered.contains("[nested]\narray = [1, 2, 3]\ninline = { answer = 42 }\n"));
+        let before = unrelated.parse::<toml_edit::DocumentMut>().unwrap();
+        let after = rendered.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(before["model"].as_str(), after["model"].as_str());
+        assert_eq!(before["nested"].to_string(), after["nested"].to_string());
     }
 
     #[test]
