@@ -71,6 +71,7 @@ pub struct PublicationContext {
     pub owner: wire::Caller,
     pub configuration_revision: meta::ConfigurationRevision,
     pub layout: meta::Layout,
+    pub retention_policy: meta::RetentionPolicy,
 }
 
 /// The complete intent that Memory must durably store before Publish is emitted.
@@ -327,6 +328,7 @@ impl BeliefCore {
                 plan.found.iter().map(|found| found.0.clone()).collect(),
             ),
             missing_modules: emission::MissingModules(plan.missing.clone()),
+            retention_policy: context.retention_policy,
         };
         self.workspaces
             .get_mut(&plan.workspace)
@@ -885,6 +887,7 @@ mod tests {
             },
             configuration_revision: meta::ConfigurationRevision(3),
             layout: layout(),
+            retention_policy: meta::RetentionPolicy::KeepAll,
         }
     }
 
