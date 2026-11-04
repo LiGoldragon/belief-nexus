@@ -122,26 +122,25 @@ pub struct PublicationInspection {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct ProtectedGenerations(pub std::vec::Vec<signal_belief_nexus::GenerationId>);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct RemovedGenerations(pub std::vec::Vec<signal_belief_nexus::GenerationId>);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct CleanupRequest {
     pub workspace: signal_belief_nexus::Workspace,
+    pub generation_id: signal_belief_nexus::GenerationId,
     pub layout: meta_signal_belief_nexus::Layout,
-    pub retention_policy: meta_signal_belief_nexus::RetentionPolicy,
-    pub protected_generations: ProtectedGenerations,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum CleanupOutcome {
+    Removed,
+    AlreadyAbsent,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct CleanupState {
     pub workspace: signal_belief_nexus::Workspace,
-    pub removed_generations: RemovedGenerations,
+    pub generation_id: signal_belief_nexus::GenerationId,
+    pub cleanup_outcome: CleanupOutcome,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -235,21 +234,6 @@ pub struct PublicationRefusal {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum CleanupOperation {
-    InspectingGenerations,
-    RemovingGeneration,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct CleanupRefusal {
-    pub workspace: signal_belief_nexus::Workspace,
-    pub cleanup_operation: CleanupOperation,
-    pub publication_evidence: PublicationEvidence,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum EmissionRefusal {
     Source(SourceRefusal),
     Publication(PublicationRefusal),
@@ -271,7 +255,7 @@ pub enum Response {
     Published(PublicationState),
     Inspected(PublicationInspection),
     Cleaned(CleanupState),
-    CleanupRefused(CleanupRefusal),
+    CleanupRefused(signal_belief_nexus::FileFailure),
     EmissionRefused(EmissionRefusal),
 }
 /// The authored schema whose digest identifies this internal effect contract.
@@ -522,17 +506,13 @@ impl FileEmission {
         let workspace = PathBuf::from(&((request.workspace.0).0));
         let paths = match PublicationPaths::new(&workspace, &request.layout) {
             Ok(paths) => paths,
-            Err(publication_evidence) => return Response::CleanupRefused(CleanupRefusal {
-                workspace: request.workspace, cleanup_operation: CleanupOperation::InspectingGenerations, publication_evidence,
-            }),
+            Err(evidence) => return Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         };
-        match paths.cleanup(&request.retention_policy, &request.protected_generations) {
-            Ok(removed_generation_vector) => Response::Cleaned(CleanupState {
-                workspace: request.workspace, removed_generations: RemovedGenerations(removed_generation_vector),
+        match paths.cleanup(&request.generation_id) {
+            Ok(cleanup_outcome) => Response::Cleaned(CleanupState {
+                workspace: request.workspace, generation_id: request.generation_id, cleanup_outcome,
             }),
-            Err((cleanup_operation, publication_evidence)) => Response::CleanupRefused(CleanupRefusal {
-                workspace: request.workspace, cleanup_operation, publication_evidence,
-            }),
+            Err(evidence) => Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         }
     }
 }
@@ -714,40 +694,48 @@ impl PublicationPaths {
         Ok((Some(pointer), Some(manifest)))
     }
 
-    fn cleanup(
-        &self,
-        policy: &meta_signal_belief_nexus::RetentionPolicy,
-        protected: &ProtectedGenerations,
-    ) -> Result<Vec<signal_belief_nexus::GenerationId>, (CleanupOperation, PublicationEvidence)> {
-        let keep_previous = match policy {
-            meta_signal_belief_nexus::RetentionPolicy::KeepAll => return Ok(Vec::new()),
-            meta_signal_belief_nexus::RetentionPolicy::KeepPrevious(value) => usize::try_from(value.0)
-                .ok().filter(|value| *value > 0)
-                .ok_or((CleanupOperation::InspectingGenerations, PublicationEvidence::ManifestMismatch))?,
+    fn cleanup(&self, target: &signal_belief_nexus::GenerationId) -> Result<CleanupOutcome, PublicationEvidence> {
+        let generation = self.generation(target)?;
+        let metadata = match fs::symlink_metadata(&generation) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(CleanupOutcome::AlreadyAbsent),
+            Err(error) => return Err(io_evidence(&generation, error)),
         };
-        let entries = fs::read_dir(&self.generations)
-            .map_err(|error| (CleanupOperation::InspectingGenerations, io_evidence(&self.generations, error)))?;
-        let mut generations = entries.flatten().filter_map(|entry| {
-            let path = entry.path();
-            if !entry.file_type().ok()?.is_dir() { return None; }
-            let manifest = read_manifest(&path.join("manifest.signal")).ok()?;
-            Some((manifest.intended_publication.0.0, manifest.generation_id, path))
-        }).collect::<Vec<_>>();
-        generations.sort_by(|a, b| b.0.cmp(&a.0));
-        let current = self.inspect_untrusted().map_err(|evidence| (CleanupOperation::InspectingGenerations, evidence))?.0
-            .map(|pointer| pointer.generation_id);
-        let retained = keep_previous.checked_add(1).unwrap_or(usize::MAX);
-        let deletions = generations.into_iter().skip(retained)
-            .filter(|(_, id, _)| current.as_ref() != Some(id) && !protected.0.contains(id))
-            .map(|(_, id, path)| (id, path)).collect::<Vec<_>>();
-        // `deletions` is the complete checked listing before any deletion runs.
-        let mut removed = Vec::with_capacity(deletions.len());
-        for (generation, path) in deletions {
-            fs::remove_dir_all(&path).map_err(|error| (CleanupOperation::RemovingGeneration, io_evidence(&path, error)))?;
-            removed.push(generation);
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(PublicationEvidence::ManifestMismatch);
         }
-        Ok(removed)
+        let manifest = read_manifest(&generation.join("manifest.signal")).map_err(|_| PublicationEvidence::ManifestMismatch)?;
+        if &manifest.generation_id != target { return Err(PublicationEvidence::ManifestMismatch); }
+
+        // Observation alone authorizes nothing. Re-read the owned pointer
+        // immediately before the one exact removal and refuse its target.
+        let current = self.inspect_untrusted()?.0.map(|pointer| pointer.generation_id);
+        if current.as_ref() == Some(target) { return Err(PublicationEvidence::OwnedPointerMismatch); }
+        fs::remove_dir_all(&generation).map_err(|error| io_evidence(&generation, error))?;
+        sync_directory(&self.generations).map_err(|error| io_evidence(&self.generations, error))?;
+        Ok(CleanupOutcome::Removed)
     }
+}
+
+fn cleanup_failure(workspace: &signal_belief_nexus::Workspace, evidence: PublicationEvidence) -> signal_belief_nexus::FileFailure {
+    use signal_belief_nexus::{FileEvidence, FileOperation, RelativePath};
+    let file_evidence = match evidence {
+        PublicationEvidence::OutsideBoundary(value) => FileEvidence::OutsideBoundary(signal_belief_nexus::OutsideBoundary_Data {
+            first_relative_path: RelativePath(value.boundary_root.0.0),
+            second_relative_path: RelativePath(value.boundary_candidate.0.0),
+        }),
+        PublicationEvidence::DestinationUnavailable(value) => FileEvidence::MissingRequired(RelativePath(value.0)),
+        PublicationEvidence::PriorRevisionMismatch(value) => FileEvidence::Conflict(signal_belief_nexus::Conflict_Data {
+            first_publication_revision_option: value.expected_revision.0,
+            second_publication_revision_option: value.observed_revision.0,
+        }),
+        PublicationEvidence::OwnedPointerMismatch | PublicationEvidence::ManifestMismatch => FileEvidence::Conflict(signal_belief_nexus::Conflict_Data {
+            first_publication_revision_option: None, second_publication_revision_option: None,
+        }),
+        PublicationEvidence::PermissionDenied => FileEvidence::PermissionDenied,
+        PublicationEvidence::Translator(value) => FileEvidence::Translator(value),
+    };
+    signal_belief_nexus::FileFailure { workspace: workspace.clone(), file_operation: FileOperation::Cleaning, file_evidence }
 }
 
 fn module_name_from_path(path: &str) -> Option<signal_belief_nexus::ModuleName> {
@@ -1022,5 +1010,34 @@ mod tests {
         let response = emission.execute(Query::Publish(publication(linked.path(), "generation", None, 1, "instructions", vec![])));
         assert!(matches!(response, Response::EmissionRefused(_)));
         assert!(!outside.path().join("current").exists());
+    }
+
+    #[test]
+    fn cleanup_removes_only_the_exact_noncurrent_owned_generation_idempotently() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let first = publication(workspace.path(), "first", None, 1, "first", vec![]);
+        assert!(matches!(emission.execute(Query::Publish(first)), Response::Published(_)));
+        let second = publication(workspace.path(), "second", Some(1), 2, "second", vec![]);
+        assert!(matches!(emission.execute(Query::Publish(second)), Response::Published(_)));
+
+        let request = CleanupRequest {
+            workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
+            generation_id: GenerationId("first".into()), layout: layout(),
+        };
+        assert!(matches!(emission.execute(Query::Clean(request.clone())), Response::Cleaned(CleanupState {
+            cleanup_outcome: CleanupOutcome::Removed, ..
+        })));
+        assert!(matches!(emission.execute(Query::Clean(request)), Response::Cleaned(CleanupState {
+            cleanup_outcome: CleanupOutcome::AlreadyAbsent, ..
+        })));
+        let current = CleanupRequest {
+            workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
+            generation_id: GenerationId("second".into()), layout: layout(),
+        };
+        assert!(matches!(emission.execute(Query::Clean(current)), Response::CleanupRefused(signal_belief_nexus::FileFailure {
+            file_operation: signal_belief_nexus::FileOperation::Cleaning, ..
+        })));
+        assert!(workspace.path().join(".belief/generations/second").is_dir());
     }
 }

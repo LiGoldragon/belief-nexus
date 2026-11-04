@@ -17,8 +17,8 @@ datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d9
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "d22d6662a868b78e110bb9c63638c70298ac3c98", default-features = false }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "d28c8e0d98109bc1ad04cc0b8e2cb39a37f447bf", default-features = false }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "ddb5fc6b53f9e976ae5097a0637d6dbfd01ae609", default-features = false }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "3d9f3f0357b56322dcd28624b03bcd106f8ef939", default-features = false }
 toml_edit = "0.22"
 
 [dev-dependencies]
