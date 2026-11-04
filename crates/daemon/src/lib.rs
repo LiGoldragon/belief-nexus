@@ -618,6 +618,13 @@ impl FileMemory {
     }
 }
 
+impl<E: EmissionPort> Daemon<E, FileMemory> {
+    pub fn start_file(bootstrap: DaemonBootstrap, effects: E) -> Result<Self, BootstrapError> {
+        let store = FileMemory::new(bootstrap.memory_file.clone());
+        Self::start(bootstrap, effects, store)
+    }
+}
+
 impl MemoryStore for FileMemory {
     fn load(&mut self) -> Result<Option<MemoryImage>, MemoryError> {
         let bytes = match fs::read(&self.path) {
@@ -965,6 +972,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 ))),
             }
         }
+        self.retry_pending_events();
         self.events[offset..].to_vec()
     }
 
@@ -1350,14 +1358,47 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
 
     fn event(&mut self, response: wire::Response) {
         let event = self.next_event(response);
-        self.events.push(event);
-        let _ = self.persist();
+        if self.persist().is_ok() {
+            self.events.push(event);
+        } else {
+            self.memory.next_event_sequence -= 1;
+        }
     }
 
     fn next_event(&mut self, response: wire::Response) -> Event {
         let sequence = self.memory.next_event_sequence;
         self.memory.next_event_sequence += 1;
         Event { sequence, response }
+    }
+
+    fn retry_pending_events(&mut self) {
+        let workspaces: Vec<_> = self
+            .memory
+            .workspaces
+            .iter()
+            .filter(|record| record.pending.is_some())
+            .map(|record| record.request.workspace.clone())
+            .collect();
+        for workspace in workspaces {
+            let basis = self
+                .workspace(&workspace)
+                .and_then(|record| record.pending.as_ref())
+                .and_then(|pending| pending.repository_states.0.first())
+                .cloned();
+            if let Some(response) = self.recover_one(&workspace) {
+                match (response, basis) {
+                    (wire::Response::Furnished(furnished), Some(state)) => {
+                        self.event(wire::Response::Changed(wire::Change {
+                            repository: state.repository,
+                            source_revision: state.source_revision,
+                            module_name_vector: Vec::new(),
+                            furnished_workspace_vector: vec![furnished],
+                        }));
+                    }
+                    (response, _) => self.event(response),
+                }
+            }
+        }
     }
 
     fn persist(&mut self) -> Result<(), MemoryError> {
