@@ -1,6 +1,51 @@
-; Stand-in: Emission is represented as a Signal root until ethos-zero supports Emission.
+; Emission is represented as a Signal root until ethos-zero supports Emission.
 Signal
-[]
-[]
-[]
-[]
+[ :signal_belief_nexus:[ ModuleName Repository RepositoryState Workspace RelativePath
+                          SourceRevision PublicationRevision GenerationId Diagnostic ]
+  :meta_signal_belief_nexus:[ Layout ] ]              ; imports
+[ Snapshot.Repository                                 ; emissions: read one immutable main snapshot
+  Publish.Publication                                 ;   or atomically replace one owned publication
+  InspectPublication.InspectionRequest ]              ;   or observe owned recovery evidence
+[ Snapshotted.SourceSnapshot                          ; outcomes
+  Published.PublicationState
+  Inspected.PublicationInspection
+  EmissionRefused.EmissionRefusal ]
+[ Content.String                                      ; types
+  AbsolutePath.String
+  ModuleSource.{ ModuleName RelativePath Content }
+  SourceSnapshot.{ Repository SourceRevision Vector<ModuleSource> }
+  SkillFile.{ RelativePath Content }
+  WorkspaceImage.{ Layout Content Vector<SkillFile> }
+  RepositoryStates.Vector<RepositoryState>
+  FoundModules.Vector<ModuleName>
+  MissingModules.Vector<ModuleName>
+  PriorPublication.Option<PublicationRevision>
+  IntendedPublication.PublicationRevision
+  PublicationManifest.{ GenerationId IntendedPublication RepositoryStates
+                         FoundModules MissingModules }
+  Publication.{ Workspace GenerationId PriorPublication IntendedPublication
+                 WorkspaceImage RepositoryStates FoundModules MissingModules }
+  PublicationState.{ Workspace GenerationId PublicationRevision }
+  InspectionRequest.{ Workspace Layout }
+  OwnedPointer.{ GenerationId PublicationRevision }
+  PublicationInspection.{ Workspace Option<OwnedPointer> Option<PublicationManifest> }
+  SourceOperation.[ ReadingMain ReadingTree ]
+  PublicationOperation.[ StagingSettings StagingGeneration WritingManifest
+                          ReplacingPointer InspectingPointer InspectingManifest ]
+  SourceEvidence.[ NotRepository MainUnavailable RevisionUnavailable Translator.Diagnostic ]
+  SourceRefusal.{ Repository SourceOperation SourceEvidence }
+  BoundaryRoot.AbsolutePath
+  BoundaryCandidate.AbsolutePath
+  BoundaryEvidence.{ BoundaryRoot BoundaryCandidate }
+  ExpectedRevision.Option<PublicationRevision>
+  ObservedRevision.Option<PublicationRevision>
+  RevisionEvidence.{ ExpectedRevision ObservedRevision }
+  PublicationEvidence.[ OutsideBoundary.BoundaryEvidence
+                         DestinationUnavailable.AbsolutePath
+                         PriorRevisionMismatch.RevisionEvidence
+                         OwnedPointerMismatch
+                         ManifestMismatch
+                         PermissionDenied
+                         Translator.Diagnostic ]
+  PublicationRefusal.{ Workspace PublicationOperation PublicationEvidence }
+  EmissionRefusal.[ Source.SourceRefusal Publication.PublicationRefusal ] ]
