@@ -1415,7 +1415,7 @@ impl MemoryStore for FileMemory {
         let parent = self.path.parent().ok_or(MemoryError::Unavailable)?;
         fs::create_dir_all(parent).map_err(|_| MemoryError::Unavailable)?;
         let encoded = image.signalize().map_err(|_| MemoryError::Corrupt)?;
-        let temporary = parent.join(format!(".belief-memory-{}.publication_option", std::process::id()));
+        let temporary = parent.join(format!(".belief-memory-{}.pending", std::process::id()));
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
