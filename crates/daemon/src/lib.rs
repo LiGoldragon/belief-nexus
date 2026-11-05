@@ -596,6 +596,27 @@ mod tests {
     }
 
     #[test]
+    fn startup_refuses_persisted_event_cursor_below_its_generated_bound() {
+        for invalid in [0, i64::MIN] {
+            let mut image = ready_memory();
+            image.next_event_sequence = invalid;
+            let committed = Arc::new(Mutex::new(None));
+            let result = Daemon::start(
+                bootstrap(),
+                FakeEffects::default(),
+                FakeMemory {
+                    image: Some(image),
+                    committed: Some(committed.clone()),
+                    ..Default::default()
+                },
+            );
+
+            assert!(matches!(result, Err(BootstrapError::CorruptState)));
+            assert!(committed.lock().unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn register_observes_main_again_before_returning() {
         let effects = FakeEffects {
             replies: [
@@ -1908,6 +1929,9 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let loaded = store.load().map_err(BootstrapError::Memory)?;
         let bootstrap_owner = bootstrap.nexus.bootstrap_owner.0.clone();
         let mut memory = loaded.clone().unwrap_or_else(|| MemoryImage::empty(bootstrap_owner));
+        if memory.next_event_sequence < 1 {
+            return Err(BootstrapError::CorruptState);
+        }
         if loaded.is_none() {
             store.store(&memory).map_err(BootstrapError::Memory)?;
         }
