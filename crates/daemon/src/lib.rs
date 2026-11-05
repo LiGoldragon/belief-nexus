@@ -1108,6 +1108,96 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_refusal_is_published_only_for_the_attempted_workspace_and_operation() {
+        let mut image = ready_memory();
+        image.configuration.ordinary_peers.as_mut().unwrap().0.push(translator::PeerBinding {
+            peer_id: translator::PeerId("other".into()),
+            peer_identity: translator::PeerIdentity {
+                user_id: translator::UserId(1000),
+                process_id: translator::ProcessId(55),
+            },
+        });
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(image), ..Default::default() },
+        )
+        .unwrap();
+        register(&mut daemon);
+        let first_owner = peer_owner("client");
+        let second_owner = peer_owner("other");
+        for (owner, name) in [(first_owner.clone(), "first"), (second_owner, "second")] {
+            assert!(matches!(
+                daemon.handle_as(
+                    wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named(name)) },
+                    owner,
+                ),
+                wire::Response::Furnished(_)
+            ));
+        }
+        let furnished = daemon.workspace(&workspace_named("first")).unwrap().successful.clone().unwrap();
+        let maintenance = CleanupMaintenance {
+            workspace: workspace_named("first"),
+            generation_id: furnished.generation_id,
+            publication_revision: furnished.publication_revision,
+        };
+        daemon.memory.cleanup_maintenance.push(maintenance.clone());
+        let subscription = daemon.subscribe(first_owner).unwrap();
+
+        daemon.effects.replies.push_back(emission::Response::CleanupRefused(wire::FileFailure {
+            workspace: workspace_named("second"),
+            file_operation: wire::FileOperation::Cleaning,
+            file_evidence: wire::FileEvidence::PermissionDenied,
+        }));
+        daemon.run_cleanup(maintenance.clone());
+        assert!(daemon.drain(subscription.id).unwrap().is_empty());
+        assert!(daemon.memory.cleanup_maintenance.contains(&maintenance));
+
+        daemon.effects.replies.push_back(emission::Response::CleanupRefused(wire::FileFailure {
+            workspace: workspace_named("first"),
+            file_operation: wire::FileOperation::Staging,
+            file_evidence: wire::FileEvidence::PermissionDenied,
+        }));
+        daemon.run_cleanup(maintenance.clone());
+        assert!(daemon.drain(subscription.id).unwrap().is_empty());
+        assert!(daemon.memory.cleanup_maintenance.contains(&maintenance));
+
+        daemon.effects.replies.push_back(emission::Response::CleanupRefused(wire::FileFailure {
+            workspace: workspace_named("first"),
+            file_operation: wire::FileOperation::Cleaning,
+            file_evidence: wire::FileEvidence::PermissionDenied,
+        }));
+        daemon.run_cleanup(maintenance.clone());
+        assert!(matches!(
+            daemon.drain(subscription.id).as_deref(),
+            Some([Event {
+                response: wire::Response::CleanupFailed(wire::CleanupFailure {
+                    workspace,
+                    file_failure: wire::FileFailure { workspace: failed_workspace, file_operation: wire::FileOperation::Cleaning, .. },
+                    ..
+                }),
+                ..
+            }]) if workspace == &workspace_named("first") && failed_workspace == &workspace_named("first")
+        ));
+        assert!(daemon.memory.cleanup_maintenance.contains(&maintenance));
+        let clean_requests: Vec<_> = daemon.effects.calls.iter().filter_map(|query| match query {
+            emission::Query::Clean(request) => Some(request),
+            _ => None,
+        }).collect();
+        assert_eq!(clean_requests.len(), 3);
+        assert!(clean_requests.iter().all(|request| request.workspace == workspace_named("first")));
+    }
+
+    #[test]
     fn failed_refurnish_keeps_prior_success_and_emits_no_success() {
         let effects = FakeEffects {
             replies: [
@@ -2265,7 +2355,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     self.memory = previous;
                 }
             }
-            emission::Response::CleanupRefused(file_failure) => {
+            emission::Response::CleanupRefused(file_failure)
+                if file_failure.workspace == maintenance.workspace
+                    && file_failure.file_operation == wire::FileOperation::Cleaning =>
+            {
                 self.event(owner, wire::Response::CleanupFailed(wire::CleanupFailure {
                     workspace: maintenance.workspace,
                     generation_id: maintenance.generation_id,
