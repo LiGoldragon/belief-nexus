@@ -353,11 +353,15 @@ impl FileEmission {
                 source_evidence: SourceEvidence::NotRepository,
             });
         }
-        if self.git(&root, ["rev-parse", "--git-dir"]).is_err() {
+        if let Err(diagnostic) = self.git(&root, ["rev-parse", "--git-dir"]) {
             return Err(SourceRefusal {
                 repository,
                 source_operation: SourceOperation::ReadingMain,
-                source_evidence: SourceEvidence::NotRepository,
+                source_evidence: if diagnostic.exit_status_option.is_some() {
+                    SourceEvidence::NotRepository
+                } else {
+                    SourceEvidence::Translator(diagnostic)
+                },
             });
         }
 
@@ -367,7 +371,11 @@ impl FileEmission {
             .map_err(|diagnostic| SourceRefusal {
                 repository: repository.clone(),
                 source_operation: SourceOperation::ReadingMain,
-                source_evidence: SourceEvidence::Translator(diagnostic),
+                source_evidence: if diagnostic.exit_status_option.is_some() {
+                    SourceEvidence::MainUnavailable
+                } else {
+                    SourceEvidence::Translator(diagnostic)
+                },
             })?;
         let revision = String::from_utf8(revision)
             .ok()
@@ -1213,6 +1221,48 @@ mod tests {
         assert_eq!(snapshot.module_source_vector.len(), 1);
         assert_eq!(snapshot.module_source_vector[0].content.0, "committed\n");
         assert_eq!(snapshot.module_source_vector[0].relative_path.0, "vision/nexus.md");
+    }
+
+    #[test]
+    fn unavailable_main_and_git_launch_failure_keep_distinct_typed_evidence() {
+        let committed = tempfile::tempdir().unwrap();
+        run_git(committed.path(), &["init", "-b", "other"]);
+        run_git(committed.path(), &["config", "user.email", "belief@example.test"]);
+        run_git(committed.path(), &["config", "user.name", "Belief Test"]);
+        fs::write(committed.path().join("README.md"), "other branch\n").unwrap();
+        run_git(committed.path(), &["add", "."]);
+        run_git(committed.path(), &["commit", "-m", "fixture"]);
+
+        let unborn = tempfile::tempdir().unwrap();
+        run_git(unborn.path(), &["init", "-b", "main"]);
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        for root in [committed.path(), unborn.path()] {
+            let repository = Repository(RepositoryPath(root.to_string_lossy().into_owned()));
+            assert!(matches!(
+                emission.execute(Query::Snapshot(repository.clone())),
+                Response::EmissionRefused(EmissionRefusal::Source(SourceRefusal {
+                    repository: refused,
+                    source_operation: SourceOperation::ReadingMain,
+                    source_evidence: SourceEvidence::MainUnavailable,
+                })) if refused == repository
+            ));
+        }
+
+        let repository = Repository(RepositoryPath(committed.path().to_string_lossy().into_owned()));
+        let missing_git = committed.path().join("missing-git-executable");
+        let emission = FileEmission::new(missing_git.clone()).unwrap();
+        assert!(matches!(
+            emission.execute(Query::Snapshot(repository.clone())),
+            Response::EmissionRefused(EmissionRefusal::Source(SourceRefusal {
+                repository: refused,
+                source_operation: SourceOperation::ReadingMain,
+                source_evidence: SourceEvidence::Translator(signal_belief_nexus::Diagnostic {
+                    executable_path,
+                    exit_status_option: None,
+                    ..
+                }),
+            })) if refused == repository && executable_path.0 == missing_git.to_string_lossy()
+        ));
     }
 
     #[test]
