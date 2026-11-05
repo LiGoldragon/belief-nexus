@@ -224,7 +224,12 @@ impl TranslatorConfiguration {
     /// Apply only the authoritative Configured result. A skipped or repeated
     /// revision leaves the current configuration snapshot whole.
     pub fn apply(&mut self, configured: &meta::ConfiguredState) -> Result<(), TranslatorError> {
-        let expected = self.revision.as_ref().map_or(0, |revision| revision.0 + 1);
+        let expected = match self.revision.as_ref() {
+            Some(revision) => revision.0.checked_add(1).ok_or_else(|| {
+                TranslatorError::Configuration("non-coherent configuration revision".into())
+            })?,
+            None => 0,
+        };
         if configured.configuration_revision.0 != expected {
             return Err(TranslatorError::Configuration("non-coherent configuration revision".into()));
         }
@@ -532,6 +537,24 @@ mod tests {
         let first = meta::ConfiguredState { configuration_revision: meta::ConfigurationRevision(0), ..gap };
         configuration.apply(&first).unwrap();
         assert_eq!(configuration.revision(), Some(&meta::ConfigurationRevision(0)));
+    }
+
+    #[test]
+    fn configuration_refuses_exhausted_revision_without_mutation() {
+        let caller = current_caller();
+        let mut configuration =
+            TranslatorConfiguration::from_snapshot(&complete_snapshot(i64::MAX, &caller)).unwrap();
+        let exhausted = meta::ConfiguredState {
+            set: meta::Set::NexusSocket(meta::SocketPath("changed".into())),
+            keeper: meta::Keeper::Translator,
+            configuration_revision: meta::ConfigurationRevision(i64::MIN),
+            readiness: meta::Readiness::Ready,
+        };
+
+        assert!(configuration.apply(&exhausted).is_err());
+        assert_eq!(configuration.revision(), Some(&meta::ConfigurationRevision(i64::MAX)));
+        assert_eq!(configuration.ordinary_nexus_socket(), Some("ordinary"));
+        assert!(configuration.ready());
     }
 
     #[test]
