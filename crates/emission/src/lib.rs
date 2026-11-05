@@ -489,11 +489,6 @@ impl FileEmission {
             return Err(publication_refusal(publication, PublicationOperation::InspectingManifest, PublicationEvidence::ManifestMismatch));
         }
 
-        fs::create_dir_all(&paths.generations)
-            .and_then(|_| fs::create_dir_all(paths.settings.parent().expect("settings has parent")))
-            .and_then(|_| fs::create_dir_all(paths.skills_link.parent().expect("skills has parent")))
-            .map_err(|error| publication_refusal(publication, operation.clone(), io_evidence(&paths.workspace, error)))?;
-
         let current = paths.inspect_current(publication)?;
         let observed = current.as_ref().map(|(_, manifest)| (manifest.intended_publication.0).clone());
         if observed != publication.prior_publication.0 {
@@ -506,6 +501,11 @@ impl FileEmission {
                 }),
             ));
         }
+
+        fs::create_dir_all(&paths.generations)
+            .and_then(|_| fs::create_dir_all(paths.settings.parent().expect("settings has parent")))
+            .and_then(|_| fs::create_dir_all(paths.skills_link.parent().expect("skills has parent")))
+            .map_err(|error| publication_refusal(publication, operation.clone(), io_evidence(&paths.workspace, error)))?;
 
         paths.prepare_capability_links(publication)
             .map_err(|evidence| publication_refusal(publication, PublicationOperation::StagingGeneration, evidence))?;
@@ -1187,6 +1187,30 @@ mod tests {
         assert!(status.success(), "git fixture failed: {args:?}");
     }
 
+    fn filesystem_tree(root: &Path) -> Vec<(PathBuf, String, Vec<u8>)> {
+        fn visit(root: &Path, directory: &Path, found: &mut Vec<(PathBuf, String, Vec<u8>)>) {
+            let mut entries: Vec<_> = fs::read_dir(directory).unwrap().map(Result::unwrap).collect();
+            entries.sort_by_key(|entry| entry.path());
+            for entry in entries {
+                let path = entry.path();
+                let relative = path.strip_prefix(root).unwrap().to_owned();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.file_type().is_symlink() {
+                    found.push((relative, "symlink".into(), fs::read_link(path).unwrap().to_string_lossy().as_bytes().to_vec()));
+                } else if metadata.is_dir() {
+                    found.push((relative, "directory".into(), Vec::new()));
+                    visit(root, &path, found);
+                } else {
+                    found.push((relative, "file".into(), fs::read(path).unwrap()));
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        visit(root, root, &mut found);
+        found
+    }
+
     #[test]
     fn publication_carries_prior_and_intended_revision_with_owned_layout() {
         let publication = Publication {
@@ -1291,6 +1315,64 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn publication_validates_existing_state_before_directory_effects() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+
+        for pointer in ["file", "escape"] {
+            let workspace = tempfile::tempdir().unwrap();
+            fs::create_dir(workspace.path().join(".belief")).unwrap();
+            let current = workspace.path().join(".belief/current");
+            if pointer == "file" {
+                fs::write(current, "not a pointer").unwrap();
+            } else {
+                symlink("../outside", current).unwrap();
+            }
+            let before = filesystem_tree(workspace.path());
+
+            assert!(matches!(emission.execute(Query::Publish(publication(
+                workspace.path(), "requested", None, 1, "instructions", vec![]
+            ))), Response::EmissionRefused(EmissionRefusal::Publication(_))));
+            assert_eq!(filesystem_tree(workspace.path()), before);
+        }
+
+        for manifest in ["missing", "corrupt"] {
+            let workspace = tempfile::tempdir().unwrap();
+            let generation = workspace.path().join(".belief/generations/broken");
+            fs::create_dir_all(&generation).unwrap();
+            if manifest == "corrupt" {
+                fs::write(generation.join("manifest.signal"), "not a manifest").unwrap();
+            }
+            symlink("generations/broken", workspace.path().join(".belief/current")).unwrap();
+            let before = filesystem_tree(workspace.path());
+
+            assert!(matches!(emission.execute(Query::Publish(publication(
+                workspace.path(), "requested", None, 1, "instructions", vec![]
+            ))), Response::EmissionRefused(EmissionRefusal::Publication(_))));
+            assert_eq!(filesystem_tree(workspace.path()), before);
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let prior = publication(workspace.path(), "prior", None, 1, "prior", vec![]);
+        install_legacy(&prior, true);
+        let before = filesystem_tree(workspace.path());
+        assert!(matches!(emission.execute(Query::Publish(publication(
+            workspace.path(), "requested", None, 2, "instructions", vec![]
+        ))), Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+            publication_evidence: PublicationEvidence::PriorRevisionMismatch(_),
+            ..
+        }))));
+        assert_eq!(filesystem_tree(workspace.path()), before);
+
+        let workspace = tempfile::tempdir().unwrap();
+        assert!(matches!(emission.execute(Query::Publish(publication(
+            workspace.path(), "valid", None, 1, "instructions", vec![]
+        ))), Response::Published(_)));
+        assert!(workspace.path().join(".belief/generations").is_dir());
+        assert!(workspace.path().join(".codex").is_dir());
+        assert!(workspace.path().join(".agents").is_dir());
     }
 
     #[test]
