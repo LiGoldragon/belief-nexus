@@ -1021,6 +1021,71 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_event_sequence_refuses_or_drops_before_any_change() {
+        let mut image = ready_memory();
+        image.next_event_sequence = i64::MAX;
+        let expected = image.clone();
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            FakeEffects::default(),
+            FakeMemory { image: Some(image), ..Default::default() },
+        )
+        .unwrap();
+        let owner = wire::Owner::Login(caller().user_id);
+
+        let refused = daemon.subscribe(owner.clone()).unwrap_err();
+        assert!(matches!(
+            refused,
+            wire::Refusal::Memory(wire::MemoryFailure {
+                memory_operation: wire::MemoryOperation::Recording,
+                ..
+            })
+        ));
+        assert_eq!(daemon.memory, expected);
+        assert_eq!(daemon.next_subscriber, 1);
+        assert!(daemon.subscribers.is_empty());
+        assert_eq!(daemon.store.stores, 0);
+
+        daemon.event(owner, wire::Response::Subscribed(Vec::new()));
+        assert_eq!(daemon.memory, expected);
+        assert!(daemon.events.is_empty());
+        assert_eq!(daemon.store.stores, 0);
+    }
+
+    #[test]
+    fn last_reservable_event_precedes_exhaustion_without_partial_subscription() {
+        let mut image = ready_memory();
+        image.configuration.subscriber_capacity = Some(2);
+        image.next_event_sequence = i64::MAX - 1;
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            FakeEffects::default(),
+            FakeMemory { image: Some(image), ..Default::default() },
+        )
+        .unwrap();
+        let owner = wire::Owner::Login(caller().user_id);
+
+        let subscription = daemon.subscribe(owner.clone()).unwrap();
+        assert_eq!(subscription.initial.sequence, i64::MAX - 1);
+        assert_eq!(daemon.memory.next_event_sequence, i64::MAX);
+        assert_eq!(daemon.store.stores, 1);
+        let expected = daemon.memory.clone();
+
+        let refused = daemon.subscribe(owner).unwrap_err();
+        assert!(matches!(
+            refused,
+            wire::Refusal::Memory(wire::MemoryFailure {
+                memory_operation: wire::MemoryOperation::Recording,
+                ..
+            })
+        ));
+        assert_eq!(daemon.memory, expected);
+        assert_eq!(daemon.next_subscriber, 2);
+        assert_eq!(daemon.subscribers.len(), 1);
+        assert_eq!(daemon.store.stores, 1);
+    }
+
+    #[test]
     fn changed_watch_announces_only_successful_publication() {
         let effects = FakeEffects {
             replies: [
@@ -2596,9 +2661,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         if self.subscribers.len() as i64 >= capacity {
             return Err(wire::Refusal::SubscriberCapacityReached(capacity));
         }
+        let response = wire::Response::Subscribed(self.state(&owner));
+        let Some(initial) = self.next_event(owner.clone(), response) else {
+            return Err(memory_refusal(wire::MemoryOperation::Recording));
+        };
         let id = self.next_subscriber;
         self.next_subscriber += 1;
-        let initial = self.next_event(owner.clone(), wire::Response::Subscribed(self.state(&owner)));
         self.subscribers.insert(
             id,
             Subscriber {
@@ -2627,7 +2695,9 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     fn event(&mut self, owner: wire::Owner, response: wire::Response) {
-        let event = self.next_event(owner, response);
+        let Some(event) = self.next_event(owner, response) else {
+            return;
+        };
         if self.persist().is_ok() {
             self.events.push(event);
         } else {
@@ -2635,10 +2705,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
     }
 
-    fn next_event(&mut self, owner: wire::Owner, response: wire::Response) -> Event {
+    fn next_event(&mut self, owner: wire::Owner, response: wire::Response) -> Option<Event> {
         let sequence = self.memory.next_event_sequence;
-        self.memory.next_event_sequence += 1;
-        Event { sequence, owner, response }
+        self.memory.next_event_sequence = sequence.checked_add(1)?;
+        Some(Event { sequence, owner, response })
     }
 
     fn retry_pending_events(&mut self) {
