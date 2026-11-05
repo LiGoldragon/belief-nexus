@@ -482,8 +482,7 @@ impl FileEmission {
         paths.prevalidate(publication)
             .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
         let identity = publication.identity();
-        let existing = paths.resolve_publication(&identity)
-            .map_err(|evidence| publication_refusal(publication, operation.clone(), evidence))?;
+        let existing = paths.resolve_publication(&identity, &publication.workspace)?;
         let intended_manifest = publication.manifest();
         if existing.as_ref().is_some_and(|value| value.manifest != intended_manifest) {
             return Err(publication_refusal(publication, PublicationOperation::InspectingManifest, PublicationEvidence::ManifestMismatch));
@@ -539,12 +538,8 @@ impl FileEmission {
                 publication_evidence: evidence,
             })),
         };
-        if let Err(evidence) = paths.resolve_publication(&request.publication_identity) {
-            return Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
-                workspace: request.workspace,
-                publication_operation: PublicationOperation::InspectingManifest,
-                publication_evidence: evidence,
-            }));
+        if let Err(refusal) = paths.resolve_publication(&request.publication_identity, &request.workspace) {
+            return Response::EmissionRefused(EmissionRefusal::Publication(refusal));
         }
         match paths.inspect_untrusted(&request.workspace) {
             Ok((pointer, manifest)) => Response::Inspected(PublicationInspection {
@@ -777,16 +772,22 @@ impl PublicationPaths {
         Ok(Some((address, manifest)))
     }
 
-    fn resolve_publication(&self, identity: &PublicationIdentity) -> Result<Option<ResolvedPublication>, PublicationEvidence> {
-        let legacy = self.legacy_directory(&identity.generation_id)?;
-        let publication = self.publication_directory(identity)?;
+    fn resolve_publication(
+        &self,
+        identity: &PublicationIdentity,
+        workspace: &signal_belief_nexus::Workspace,
+    ) -> Result<Option<ResolvedPublication>, PublicationRefusal> {
+        let staging = |evidence| inspection_refusal(workspace, PublicationOperation::StagingGeneration, evidence);
+        let inspecting = |evidence| inspection_refusal(workspace, PublicationOperation::InspectingManifest, evidence);
+        let legacy = self.legacy_directory(&identity.generation_id).map_err(staging)?;
+        let publication = self.publication_directory(identity).map_err(staging)?;
         if legacy == publication {
-            return Err(PublicationEvidence::ManifestMismatch);
+            return Err(staging(PublicationEvidence::ManifestMismatch));
         }
         let legacy_value = self.inspect_candidate(&legacy);
         let publication_value = self.inspect_candidate(&publication);
-        let legacy_value = legacy_value?;
-        let publication_value = publication_value?;
+        let legacy_value = legacy_value.map_err(inspecting)?;
+        let publication_value = publication_value.map_err(inspecting)?;
         let mut matching = Vec::new();
         if let Some((_, manifest)) = legacy_value {
             if manifest.identity() == *identity {
@@ -795,14 +796,14 @@ impl PublicationPaths {
         }
         if let Some((_, manifest)) = publication_value {
             if manifest.identity() != *identity {
-                return Err(PublicationEvidence::ManifestMismatch);
+                return Err(inspecting(PublicationEvidence::ManifestMismatch));
             }
             matching.push(ResolvedPublication { path: publication, manifest });
         }
         match matching.len() {
             0 => Ok(None),
             1 => Ok(matching.pop()),
-            _ => Err(PublicationEvidence::ManifestMismatch),
+            _ => Err(inspecting(PublicationEvidence::ManifestMismatch)),
         }
     }
 
@@ -949,7 +950,9 @@ impl PublicationPaths {
         target: &PublicationIdentity,
         workspace: &signal_belief_nexus::Workspace,
     ) -> Result<CleanupOutcome, PublicationEvidence> {
-        let Some(resolved) = self.resolve_publication(target)? else { return Ok(CleanupOutcome::AlreadyAbsent); };
+        let Some(resolved) = self.resolve_publication(target, workspace).map_err(|refusal| refusal.publication_evidence)? else {
+            return Ok(CleanupOutcome::AlreadyAbsent);
+        };
         // Observation alone authorizes nothing. Re-read the owned pointer
         // immediately before the one exact removal and refuse its target.
         let current = self.inspect_untrusted(workspace).map_err(|refusal| refusal.publication_evidence)?.0;
@@ -1373,6 +1376,52 @@ mod tests {
         assert!(workspace.path().join(".belief/generations").is_dir());
         assert!(workspace.path().join(".codex").is_dir());
         assert!(workspace.path().join(".agents").is_dir());
+    }
+
+    #[test]
+    fn requested_publication_candidate_failures_keep_the_inspection_stage_without_effects() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+
+        for manifest in ["missing", "corrupt"] {
+            let workspace = tempfile::tempdir().unwrap();
+            let candidate = workspace.path().join(".belief/generations")
+                .join(publication_component_for("requested", 1));
+            fs::create_dir_all(&candidate).unwrap();
+            if manifest == "corrupt" {
+                fs::write(candidate.join("manifest.signal"), "not a manifest").unwrap();
+            }
+            let before = filesystem_tree(workspace.path());
+            let requested = publication(workspace.path(), "requested", None, 1, "instructions", vec![]);
+
+            assert!(matches!(
+                emission.execute(Query::Publish(requested.clone())),
+                Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+                    workspace: refused_workspace,
+                    publication_operation: PublicationOperation::InspectingManifest,
+                    publication_evidence: PublicationEvidence::ManifestMismatch,
+                })) if refused_workspace == requested.workspace
+            ));
+            assert_eq!(filesystem_tree(workspace.path()), before);
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let requested = publication(workspace.path(), "requested", None, 1, "instructions", vec![]);
+        let candidate = workspace.path().join(".belief/generations")
+            .join(publication_component_for("requested", 1));
+        write_publication_directory(&requested, &candidate);
+        assert!(matches!(emission.execute(Query::Publish(requested)), Response::Published(_)));
+        assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(),
+            PathBuf::from("generations").join(publication_component_for("requested", 1)));
+
+        let workspace = tempfile::tempdir().unwrap();
+        let invalid = publication(workspace.path(), "../invalid", None, 1, "instructions", vec![]);
+        assert!(matches!(
+            emission.execute(Query::Publish(invalid)),
+            Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+                publication_operation: PublicationOperation::StagingGeneration,
+                ..
+            }))
+        ));
     }
 
     #[test]
