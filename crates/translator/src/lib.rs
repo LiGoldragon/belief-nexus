@@ -180,6 +180,9 @@ impl TranslatorConfiguration {
         })
     }
     pub fn from_snapshot(snapshot: &meta::TranslatorConfiguration) -> Result<Self, TranslatorError> {
+        if snapshot.configuration_revision.0 < 0 {
+            return Err(TranslatorError::Configuration("negative configuration revision".into()));
+        }
         let mut configuration = Self::default();
         let mut seen = std::collections::HashSet::new();
         for set in &snapshot.set_vector {
@@ -202,6 +205,9 @@ impl TranslatorConfiguration {
     }
 
     pub fn restore(&mut self, snapshot: &meta::TranslatorConfiguration) -> Result<(), TranslatorError> {
+        if snapshot.configuration_revision.0 < 0 {
+            return Err(TranslatorError::Configuration("negative configuration revision".into()));
+        }
         let mut seen = std::collections::HashSet::new();
         let mut candidate = self.clone();
         for set in &snapshot.set_vector {
@@ -555,6 +561,38 @@ mod tests {
         assert_eq!(configuration.revision(), Some(&meta::ConfigurationRevision(i64::MAX)));
         assert_eq!(configuration.ordinary_nexus_socket(), Some("ordinary"));
         assert!(configuration.ready());
+    }
+
+    #[test]
+    fn snapshots_refuse_negative_revisions_before_construction_or_restore_mutation() {
+        let caller = current_caller();
+        for invalid in [-1, i64::MIN] {
+            let mut snapshot = complete_snapshot(invalid, &caller);
+            snapshot.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("invalid".into()));
+            assert!(matches!(TranslatorConfiguration::from_snapshot(&snapshot), Err(TranslatorError::Configuration(_))));
+
+            let mut current = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+            let before = current.clone();
+            assert!(matches!(current.restore(&snapshot), Err(TranslatorError::Configuration(_))));
+            assert_eq!(current.revision, before.revision);
+            assert_eq!(current.nexus_socket, before.nexus_socket);
+            assert_eq!(current.meta_nexus_socket, before.meta_nexus_socket);
+            assert_eq!(current.call_timeout, before.call_timeout);
+            assert_eq!(current.output_limit, before.output_limit);
+            assert_eq!(current.text_budget, before.text_budget);
+            assert_eq!(current.frame_capacity, before.frame_capacity);
+            assert_eq!(current.transport_timeout, before.transport_timeout);
+            assert_eq!(current.allowed_nexus_peers, before.allowed_nexus_peers);
+            assert_eq!(current.git_executable, before.git_executable);
+            assert_eq!(current.snapshot_ready, before.snapshot_ready);
+        }
+
+        let zero = complete_snapshot(0, &caller);
+        assert_eq!(TranslatorConfiguration::from_snapshot(&zero).unwrap().revision(), Some(&meta::ConfigurationRevision(0)));
+        let mut restored = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+        restored.restore(&zero).unwrap();
+        assert_eq!(restored.revision(), Some(&meta::ConfigurationRevision(0)));
+        assert!(restored.ready());
     }
 
     #[test]
