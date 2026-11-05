@@ -208,6 +208,9 @@ impl TranslatorConfiguration {
         if snapshot.configuration_revision.0 < 0 {
             return Err(TranslatorError::Configuration("negative configuration revision".into()));
         }
+        if self.revision.as_ref().is_some_and(|current| snapshot.configuration_revision.0 < current.0) {
+            return Err(TranslatorError::Configuration("stale configuration snapshot".into()));
+        }
         let mut seen = std::collections::HashSet::new();
         let mut candidate = self.clone();
         for set in &snapshot.set_vector {
@@ -652,10 +655,36 @@ mod tests {
 
         let zero = complete_snapshot(0, &caller);
         assert_eq!(TranslatorConfiguration::from_snapshot(&zero).unwrap().revision(), Some(&meta::ConfigurationRevision(0)));
-        let mut restored = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+        let mut restored = TranslatorConfiguration::default();
         restored.restore(&zero).unwrap();
         assert_eq!(restored.revision(), Some(&meta::ConfigurationRevision(0)));
         assert!(restored.ready());
+    }
+
+    #[test]
+    fn restore_refuses_stale_snapshots_and_reconciles_equal_or_newer_revisions() {
+        let caller = current_caller();
+        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+
+        let mut stale = complete_snapshot(7, &caller);
+        stale.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("stale".into()));
+        let mut current = initial.clone();
+        assert!(matches!(current.restore(&stale), Err(TranslatorError::Configuration(_))));
+        assert_same_configuration(&current, &initial);
+
+        let mut equal = complete_snapshot(8, &caller);
+        equal.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("equal".into()));
+        current.restore(&equal).unwrap();
+        assert_eq!(current.revision(), Some(&meta::ConfigurationRevision(8)));
+        assert_eq!(current.ordinary_nexus_socket(), Some("equal"));
+        assert!(current.ready());
+
+        let mut newer = complete_snapshot(10, &caller);
+        newer.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("newer".into()));
+        current.restore(&newer).unwrap();
+        assert_eq!(current.revision(), Some(&meta::ConfigurationRevision(10)));
+        assert_eq!(current.ordinary_nexus_socket(), Some("newer"));
+        assert!(current.ready());
     }
 
     #[test]
