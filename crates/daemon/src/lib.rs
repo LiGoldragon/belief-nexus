@@ -1107,6 +1107,75 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_subscriber_id_refuses_before_event_or_subscription_change() {
+        let image = ready_memory();
+        let expected = image.clone();
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            FakeEffects::default(),
+            FakeMemory { image: Some(image), ..Default::default() },
+        )
+        .unwrap();
+        daemon.next_subscriber = i64::MAX;
+
+        let refused = daemon
+            .subscribe(wire::Owner::Login(caller().user_id))
+            .unwrap_err();
+
+        assert!(matches!(
+            refused,
+            wire::Refusal::Memory(wire::MemoryFailure {
+                memory_operation: wire::MemoryOperation::Recording,
+                ..
+            })
+        ));
+        assert_eq!(daemon.memory, expected);
+        assert_eq!(daemon.next_subscriber, i64::MAX);
+        assert!(daemon.subscribers.is_empty());
+        assert_eq!(daemon.store.stores, 0);
+    }
+
+    #[test]
+    fn failed_subscription_recording_rolls_back_id_cursor_and_subscriber() {
+        let image = ready_memory();
+        let expected = image.clone();
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            FakeEffects::default(),
+            FakeMemory {
+                image: Some(image),
+                fail_at: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let owner = wire::Owner::Login(caller().user_id);
+
+        let refused = daemon.subscribe(owner.clone()).unwrap_err();
+        assert!(matches!(
+            refused,
+            wire::Refusal::Memory(wire::MemoryFailure {
+                memory_operation: wire::MemoryOperation::Recording,
+                ..
+            })
+        ));
+        assert_eq!(daemon.memory, expected);
+        assert_eq!(daemon.next_subscriber, 1);
+        assert!(daemon.subscribers.is_empty());
+        assert_eq!(daemon.store.stores, 1);
+        assert_eq!(daemon.store.image, Some(expected));
+
+        daemon.store.fail_at = None;
+        let subscription = daemon.subscribe(owner).unwrap();
+        assert_eq!(subscription.id, 1);
+        assert_eq!(subscription.initial.sequence, 1);
+        assert_eq!(daemon.memory.next_event_sequence, 2);
+        assert_eq!(daemon.next_subscriber, 2);
+        assert_eq!(daemon.subscribers.len(), 1);
+        assert_eq!(daemon.store.stores, 2);
+    }
+
+    #[test]
     fn changed_watch_announces_only_successful_publication() {
         let effects = FakeEffects {
             replies: [
@@ -2685,12 +2754,15 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         if self.subscribers.len() as i64 >= capacity {
             return Err(wire::Refusal::SubscriberCapacityReached(capacity));
         }
+        let id = self.next_subscriber;
+        let Some(next_subscriber) = id.checked_add(1) else {
+            return Err(memory_refusal(wire::MemoryOperation::Recording));
+        };
         let response = wire::Response::Subscribed(self.state(&owner));
         let Some(initial) = self.next_event(owner.clone(), response) else {
             return Err(memory_refusal(wire::MemoryOperation::Recording));
         };
-        let id = self.next_subscriber;
-        self.next_subscriber += 1;
+        self.next_subscriber = next_subscriber;
         self.subscribers.insert(
             id,
             Subscriber {
@@ -2700,7 +2772,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         );
         if self.persist().is_err() {
             self.subscribers.remove(&id);
-            self.memory.next_event_sequence -= 1;
+            self.memory.next_event_sequence = initial.sequence;
+            self.next_subscriber = id;
             return Err(memory_refusal(wire::MemoryOperation::Recording));
         }
         Ok(Subscription { id, initial })
