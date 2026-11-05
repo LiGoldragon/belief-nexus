@@ -41,3 +41,24 @@ fn caller_claim_is_not_a_public_text_query() {
     let text = shared_translator::encode(&claimed);
     assert!(decode_public(&text, TextLimits { nodes: 4096, depth: 64 }).is_err());
 }
+
+#[test]
+fn ordinary_and_meta_clis_resolve_runtime_without_state_environment() {
+    let runtime = tempfile::tempdir().unwrap();
+    for (executable, datom, socket) in [
+        (env!("CARGO_BIN_EXE_belief-nexus"), "Resolve.[]", "ordinary.sock"),
+        (env!("CARGO_BIN_EXE_belief-nexus-meta"), "Configure.{ None RepositoryPolling.1 }", "meta.sock"),
+    ] {
+        let output = Command::new(executable)
+            .args(["runtime-only", datom, socket])
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .env_remove("HOME")
+            .env_remove("XDG_STATE_HOME")
+            .output().unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("No such file or directory"), "unexpected CLI error: {error}");
+        assert!(!error.contains("HOME"), "CLI resolved unrelated State: {error}");
+        assert!(!error.contains("XDG_STATE_HOME"), "CLI resolved unrelated State: {error}");
+    }
+}
