@@ -624,6 +624,64 @@ mod tests {
     }
 
     #[test]
+    fn register_rejects_a_snapshot_for_an_unrequested_repository_before_mutation() {
+        let effects = FakeEffects {
+            replies: [emission::Response::Snapshotted(other_snapshot("one", "other"))].into(),
+            ..Default::default()
+        };
+        let initial = ready_memory();
+        let memory = FakeMemory {
+            image: Some(initial.clone()),
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+
+        let response = daemon.handle(wire::Call {
+            caller: caller(),
+            query: wire::Query::Register(repository()),
+        });
+
+        assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotReady)));
+        assert_eq!(daemon.memory, initial);
+        assert_eq!(daemon.store.stores, 0);
+        assert_eq!(daemon.effects.calls, vec![emission::Query::Snapshot(repository())]);
+    }
+
+    #[test]
+    fn register_handoff_ignores_a_snapshot_for_another_repository() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(other_snapshot("two", "other")),
+            ]
+            .into(),
+            ..Default::default()
+        };
+        let memory = FakeMemory {
+            image: Some(ready_memory()),
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+
+        let response = daemon.handle(wire::Call {
+            caller: caller(),
+            query: wire::Query::Register(repository()),
+        });
+
+        assert!(matches!(
+            response,
+            wire::Response::Registered(wire::RepositoryState {
+                repository: ref value,
+                source_revision: wire::SourceRevision(ref revision),
+            }) if value == &repository() && revision == "one"
+        ));
+        assert_eq!(daemon.memory.repositories.len(), 1);
+        assert_eq!(daemon.memory.repositories[0].snapshot, snapshot("one", "one"));
+        assert_eq!(daemon.store.stores, 1);
+        assert_eq!(daemon.store.image, Some(daemon.memory.clone()));
+    }
+
+    #[test]
     fn pending_is_durable_before_publish_and_post_pointer_failure_keeps_it() {
         let effects = FakeEffects {
             replies: [
@@ -996,6 +1054,55 @@ mod tests {
         assert_eq!(
             daemon.memory.repositories[0].snapshot.source_revision,
             wire::SourceRevision("two".into())
+        );
+    }
+
+    #[test]
+    fn watch_mismatch_preserves_every_repository_and_workspace() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+            ]
+            .into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let memory = FakeMemory {
+            image: Some(ready_memory()),
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call {
+                caller: caller(),
+                query: wire::Query::Register(other_repository()),
+            }),
+            wire::Response::Registered(_)
+        ));
+        assert!(matches!(
+            daemon.handle(wire::Call {
+                caller: caller(),
+                query: wire::Query::Furnish(furnish_request()),
+            }),
+            wire::Response::Furnished(_)
+        ));
+        let before = daemon.memory.clone();
+        let stores = daemon.store.stores;
+
+        daemon.effects.replies.extend([
+            emission::Response::Snapshotted(other_snapshot("other-two", "malformed")),
+            emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+        ]);
+        assert!(daemon.poll_once().is_empty());
+        assert_eq!(daemon.memory, before);
+        assert_eq!(daemon.store.stores, stores);
+        assert_eq!(
+            daemon.watch_failures,
+            vec![watch_unavailable(repository(), Some(wire::SourceRevision("one".into())))]
         );
     }
 
@@ -1982,6 +2089,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             match self.emit_effect(emission::Query::Snapshot(repository.clone()))
             {
                 emission::Response::Snapshotted(snapshot)
+                    if snapshot.repository != repository => self
+                        .watch_failures
+                        .push(watch_unavailable(repository, Some(old_revision))),
+                emission::Response::Snapshotted(snapshot)
                     if snapshot.source_revision == old_revision => {}
                 emission::Response::Snapshotted(snapshot) => self.apply_snapshot(snapshot),
                 emission::Response::EmissionRefused(emission::EmissionRefusal::Source(source)) => {
@@ -2054,7 +2165,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         let first = match self.emit_effect(emission::Query::Snapshot(repository.clone()))
         {
-            emission::Response::Snapshotted(snapshot) => snapshot,
+            emission::Response::Snapshotted(snapshot) if snapshot.repository == repository => snapshot,
             emission::Response::EmissionRefused(refusal) => {
                 return wire::Response::Refused(map_emission(refusal));
             }
@@ -2066,7 +2177,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         // Immediate next observation closes the register/watch handoff window.
         if let emission::Response::Snapshotted(next) = self.emit_effect(emission::Query::Snapshot(repository.clone()))
         {
-            if next.source_revision != first.source_revision {
+            if next.repository == repository && next.source_revision != first.source_revision {
                 self.apply_snapshot(next);
             }
         }
