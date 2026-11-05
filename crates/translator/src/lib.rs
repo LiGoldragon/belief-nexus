@@ -230,6 +230,9 @@ impl TranslatorConfiguration {
     /// Apply only the authoritative Configured result. A skipped or repeated
     /// revision leaves the current configuration snapshot whole.
     pub fn apply(&mut self, configured: &meta::ConfiguredState) -> Result<(), TranslatorError> {
+        if configured.keeper != owner(&configured.set) {
+            return Err(TranslatorError::Configuration("configured keeper does not own its setting".into()));
+        }
         let expected = match self.revision.as_ref() {
             Some(revision) => revision.0.checked_add(1).ok_or_else(|| {
                 TranslatorError::Configuration("non-coherent configuration revision".into())
@@ -504,6 +507,20 @@ mod tests {
         }
     }
 
+    fn assert_same_configuration(actual: &TranslatorConfiguration, expected: &TranslatorConfiguration) {
+        assert_eq!(actual.revision, expected.revision);
+        assert_eq!(actual.nexus_socket, expected.nexus_socket);
+        assert_eq!(actual.meta_nexus_socket, expected.meta_nexus_socket);
+        assert_eq!(actual.call_timeout, expected.call_timeout);
+        assert_eq!(actual.output_limit, expected.output_limit);
+        assert_eq!(actual.text_budget, expected.text_budget);
+        assert_eq!(actual.frame_capacity, expected.frame_capacity);
+        assert_eq!(actual.transport_timeout, expected.transport_timeout);
+        assert_eq!(actual.allowed_nexus_peers, expected.allowed_nexus_peers);
+        assert_eq!(actual.git_executable, expected.git_executable);
+        assert_eq!(actual.snapshot_ready, expected.snapshot_ready);
+    }
+
     #[test]
     fn ordinary_and_meta_text_round_trip() {
         let limits = TextLimits { nodes: 4_096, depth: 64 };
@@ -561,6 +578,52 @@ mod tests {
         assert_eq!(configuration.revision(), Some(&meta::ConfigurationRevision(i64::MAX)));
         assert_eq!(configuration.ordinary_nexus_socket(), Some("ordinary"));
         assert!(configuration.ready());
+    }
+
+    #[test]
+    fn configured_keeper_must_own_its_setting_before_any_state_changes() {
+        let caller = current_caller();
+        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(7, &caller)).unwrap();
+        for mismatched in [
+            meta::ConfiguredState {
+                set: meta::Set::NexusSocket(meta::SocketPath("changed".into())),
+                keeper: meta::Keeper::Nexus,
+                configuration_revision: meta::ConfigurationRevision(8),
+                readiness: meta::Readiness::Awaiting(vec![]),
+            },
+            meta::ConfiguredState {
+                set: meta::Set::RepositoryPolling(meta::Timeout(250)),
+                keeper: meta::Keeper::Translator,
+                configuration_revision: meta::ConfigurationRevision(8),
+                readiness: meta::Readiness::Awaiting(vec![]),
+            },
+        ] {
+            let mut configuration = initial.clone();
+            assert!(matches!(configuration.apply(&mismatched), Err(TranslatorError::Configuration(_))));
+            assert_same_configuration(&configuration, &initial);
+        }
+
+        let mut translator_owned = initial.clone();
+        translator_owned.apply(&meta::ConfiguredState {
+            set: meta::Set::NexusSocket(meta::SocketPath("changed".into())),
+            keeper: meta::Keeper::Translator,
+            configuration_revision: meta::ConfigurationRevision(8),
+            readiness: meta::Readiness::Ready,
+        }).unwrap();
+        assert_eq!(translator_owned.revision(), Some(&meta::ConfigurationRevision(8)));
+        assert_eq!(translator_owned.ordinary_nexus_socket(), Some("changed"));
+        assert!(translator_owned.ready());
+
+        let mut nexus_owned = initial;
+        nexus_owned.apply(&meta::ConfiguredState {
+            set: meta::Set::RepositoryPolling(meta::Timeout(250)),
+            keeper: meta::Keeper::Nexus,
+            configuration_revision: meta::ConfigurationRevision(8),
+            readiness: meta::Readiness::Awaiting(vec![meta::SettingName::RepositoryPolling]),
+        }).unwrap();
+        assert_eq!(nexus_owned.revision(), Some(&meta::ConfigurationRevision(8)));
+        assert_eq!(nexus_owned.ordinary_nexus_socket(), Some("ordinary"));
+        assert!(!nexus_owned.ready());
     }
 
     #[test]
