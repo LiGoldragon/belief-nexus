@@ -704,12 +704,15 @@ impl PublicationPaths {
         }
         let _ = self.rendered_settings(publication)?;
         let publication_directory = self.publication_directory(&publication.identity())?;
-        let mut skill_paths = std::collections::HashSet::new();
+        let mut skill_paths = Vec::new();
         for skill in &publication.workspace_image.skill_file_vector {
             let relative = safe_relative(&skill.relative_path.0)?;
-            if !skill_paths.insert(relative.clone()) {
+            if skill_paths.iter().any(|existing: &PathBuf|
+                relative.starts_with(existing) || existing.starts_with(&relative))
+            {
                 return Err(PublicationEvidence::PermissionDenied);
             }
+            skill_paths.push(relative.clone());
             let candidate = publication_directory.join("skills").join(relative);
             if !candidate.starts_with(&self.generations) {
                 return Err(boundary(&self.generations, &candidate));
@@ -1517,6 +1520,41 @@ mod tests {
         assert!(matches!(emission.execute(Query::Publish(valid)), Response::Published(_)));
         assert_eq!(fs::read_to_string(distinct.path().join(".agents/skills/first/SKILL.md")).unwrap(), "first");
         assert_eq!(fs::read_to_string(distinct.path().join(".agents/skills/second/SKILL.md")).unwrap(), "second");
+    }
+
+    #[test]
+    fn ancestor_skill_destinations_refuse_before_capability_effects_in_either_order() {
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        for (generation, paths) in [
+            ("file-first", ["witness", "witness/SKILL.md"]),
+            ("directory-first", ["witness/SKILL.md", "witness"]),
+        ] {
+            let workspace = tempfile::tempdir().unwrap();
+            let refused = publication(workspace.path(), generation, None, 1, "instructions", paths.into_iter().map(|path|
+                SkillFile { relative_path: RelativePath(path.into()), content: Content(path.into()) }
+            ).collect());
+            assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+                publication_operation: PublicationOperation::StagingGeneration,
+                publication_evidence: PublicationEvidence::PermissionDenied,
+                ..
+            }))));
+            assert!(fs::read_dir(workspace.path()).unwrap().next().is_none());
+        }
+
+        let existing = tempfile::tempdir().unwrap();
+        fs::create_dir_all(existing.path().join(".codex")).unwrap();
+        let settings = b"model = \"gpt-test\" # exact\n";
+        fs::write(existing.path().join(".codex/config.toml"), settings).unwrap();
+        fs::write(existing.path().join("keep"), b"foreign").unwrap();
+        let refused = publication(existing.path(), "ancestor", None, 1, "instructions", vec![
+            SkillFile { relative_path: RelativePath("witness".into()), content: Content("file".into()) },
+            SkillFile { relative_path: RelativePath("witness/SKILL.md".into()), content: Content("nested".into()) },
+        ]);
+        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(_)));
+        assert_eq!(fs::read(existing.path().join(".codex/config.toml")).unwrap(), settings);
+        assert_eq!(fs::read(existing.path().join("keep")).unwrap(), b"foreign");
+        assert!(!existing.path().join(".belief").exists());
+        assert!(!existing.path().join(".agents").exists());
     }
 
     #[test]
