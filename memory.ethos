@@ -1,0 +1,10 @@
+Memory
+[ signal_belief_nexus:[ Owner PeerList FurnishRequest FurnishedWorkspace RepositoryState GenerationId PublicationRevision Workspace ]
+  meta_signal_belief_nexus:[ ConfigurationRevision Timeout HarnessLayout PlacementDefault RetentionPolicy ByteLimit Set Layout ]
+  emission_belief_nexus:[ SourceSnapshot Publication ] ]
+[ Configuration.{ ConfigurationRevision Option<Timeout> Option<Integer> Option<PeerList> Option<PeerList> Vector<HarnessLayout> Vector<PlacementDefault> RetentionPolicy Option<ByteLimit> Option<Timeout> Vector<Set> }
+  StoredRepository.{ Owner SourceSnapshot }
+  StoredWorkspace.{ Owner FurnishRequest ConfigurationRevision Layout Vector<PlacementDefault> RetentionPolicy Option<FurnishedWorkspace> Vector<SuccessfulGeneration> Vector<RepositoryState> Option<Publication> }
+  SuccessfulGeneration.{ GenerationId PublicationRevision }
+  CleanupMaintenance.{ Workspace GenerationId PublicationRevision }
+  MemoryImage.{ Owner Configuration Vector<StoredRepository> Vector<StoredWorkspace> Vector<CleanupMaintenance> Integer } ]

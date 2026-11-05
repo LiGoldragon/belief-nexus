@@ -61,6 +61,29 @@
             cargoTestExtraArgs = "--workspace --all-features";
             nativeBuildInputs = [ pkgs.git ];
           };
+          daemon-memory-default = rust.craneLib.buildPackage {
+            pname = "belief-nexus-daemon-memory-default"; version = "0.1.0";
+            src = source; inherit cargoArtifacts;
+            cargoExtraArgs = "-p belief-nexus-daemon --bin belief-nexus-daemon";
+            doCheck = false;
+          };
+          daemon-memory-all-features = rust.craneLib.buildPackage {
+            pname = "belief-nexus-daemon-memory-all-features"; version = "0.1.0";
+            src = source; inherit cargoArtifacts;
+            cargoExtraArgs = "-p belief-nexus-daemon --bin belief-nexus-daemon --all-features";
+            doCheck = false;
+          };
+          memory-generated = pkgs.runCommand "belief-memory-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./memory.ethos;
+            committed = ./crates/daemon/src/memory.rs;
+          } ''
+            temporary="$(${pkgs.coreutils}/bin/mktemp -d)"
+            "$generator/bin/ethos-zero" "Generate.{ «$declaration» «$temporary» }"
+            generated="$(${pkgs.findutils}/bin/find "$temporary" -maxdepth 1 -name '*.rs' -print -quit)"
+            ${pkgs.diffutils}/bin/cmp "$generated" "$committed"
+            touch "$out"
+          '';
           emission-generated = pkgs.runCommand "belief-emission-generated" {
             generator = ethos-zero.packages.${system}.default;
             declaration = ./emission.ethos;

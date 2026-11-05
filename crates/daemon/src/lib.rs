@@ -7,7 +7,6 @@
 use belief_nexus_core::{BeliefCore, PublicationContext, RecoveryOutcome, ResolveError};
 use emission_belief_nexus as emission;
 use meta_signal_belief_nexus as meta;
-use rkyv::{Archive, Deserialize, Serialize};
 use signal::{ByteViewable, Restorable, Signal, Signalizable};
 use signal_belief_nexus as wire;
 use std::{
@@ -16,6 +15,9 @@ use std::{
     io::Write,
     path::PathBuf,
 };
+
+mod memory;
+pub use memory::{CleanupMaintenance, Configuration, MemoryImage, StoredRepository, StoredWorkspace, SuccessfulGeneration};
 
 pub mod server;
 
@@ -26,17 +28,17 @@ pub struct DaemonBootstrap {
 
 fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
     let mut core = BeliefCore::new();
-    for repository in &memory.repositories {
-        core.observe(repository.snapshot.clone().into())
+    for repository in &memory.stored_repository_vector {
+        core.observe(repository.source_snapshot.clone().into())
             .map_err(|_| ())?;
     }
-    for workspace in &memory.workspaces {
-        if let Some(successful) = &workspace.successful {
+    for workspace in &memory.stored_workspace_vector {
+        if let Some(successful) = &workspace.furnished_workspace_option {
             if !core.restore_furnished(
-                workspace.request.clone(),
+                workspace.furnish_request.clone(),
                 successful.clone(),
                 workspace
-                    .successful_basis
+                    .repository_state_vector
                     .iter()
                     .map(|state| (state.repository.clone(), state.source_revision.clone()))
                     .collect(),
@@ -44,21 +46,21 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
                 return Err(());
             }
         }
-        if let Some(pending) = &workspace.pending {
-            let defaults = workspace.placement_defaults.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect();
+        if let Some(pending) = &workspace.publication_option {
+            let defaults = workspace.placement_default_vector.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect();
             let plan = core
-                .prepare_furnish_with_defaults(workspace.request.clone(), &defaults)
+                .prepare_furnish_with_defaults(workspace.furnish_request.clone(), &defaults)
                 .map_err(|_| ())?;
             let context = PublicationContext {
                 owner: workspace.owner.clone(),
                 configuration_revision: workspace.configuration_revision.clone(),
                 layout: workspace.layout.clone(),
-                retention_policy: workspace.retention.clone(),
+                retention_policy: workspace.retention_policy.clone(),
             };
             if &core.begin_publication(&plan, context).map_err(|_| ())? != pending {
                 return Err(());
             }
-        } else if workspace.successful.is_none() {
+        } else if workspace.furnished_workspace_option.is_none() {
             return Err(());
         }
     }
@@ -379,23 +381,23 @@ mod tests {
         MemoryImage {
             owner: wire::Owner::Login(translator::UserId(1000)),
             configuration: Configuration {
-                revision: meta::ConfigurationRevision(4),
-                repository_polling: Some(meta::Timeout(100)),
-                subscriber_capacity: Some(1),
-                ordinary_peers: Some(wire::PeerList(vec![peer.clone()])),
-                meta_peers: Some(wire::PeerList(vec![peer.clone()])),
-                layouts: vec![meta::HarnessLayout { harness: wire::Harness::Codex, layout: layout() }],
-                placements: vec![
+                configuration_revision: meta::ConfigurationRevision(4),
+                first_timeout_option: Some(meta::Timeout(100)),
+                integer_option: Some(1),
+                first_peer_list_option: Some(wire::PeerList(vec![peer.clone()])),
+                second_peer_list_option: Some(wire::PeerList(vec![peer.clone()])),
+                harness_layout_vector: vec![meta::HarnessLayout { harness: wire::Harness::Codex, layout: layout() }],
+                placement_default_vector: vec![
                     meta::PlacementDefault { kind: wire::Kind::Spirit, placement: wire::Placement::SystemPrompt },
                     meta::PlacementDefault { kind: wire::Kind::Intent, placement: wire::Placement::SystemPrompt },
                     meta::PlacementDefault { kind: wire::Kind::Vision, placement: wire::Placement::Skills },
                     meta::PlacementDefault { kind: wire::Kind::Knowledge, placement: wire::Placement::Skills },
                     meta::PlacementDefault { kind: wire::Kind::Role, placement: wire::Placement::Skills },
                 ],
-                retention: meta::RetentionPolicy::KeepAll,
-                nexus_frame_capacity: Some(meta::ByteLimit(1_000_000)),
-                nexus_transport_timeout: Some(meta::Timeout(100)),
-                translator_sets: vec![
+                retention_policy: meta::RetentionPolicy::KeepAll,
+                byte_limit_option: Some(meta::ByteLimit(1_000_000)),
+                second_timeout_option: Some(meta::Timeout(100)),
+                set_vector: vec![
                     meta::Set::NexusSocket(meta::SocketPath("ordinary".into())),
                     meta::Set::MetaNexusSocket(meta::SocketPath("meta".into())),
                     meta::Set::CallTimeout(meta::Timeout(100)),
@@ -407,10 +409,10 @@ mod tests {
                     meta::Set::GitExecutable(wire::ExecutablePath("git".into())),
                 ],
             },
-            repositories: Vec::new(),
-            workspaces: Vec::new(),
-            cleanup_maintenance: Vec::new(),
-            next_event_sequence: 1,
+            stored_repository_vector: Vec::new(),
+            stored_workspace_vector: Vec::new(),
+            cleanup_maintenance_vector: Vec::new(),
+            integer: 1,
         }
     }
 
@@ -525,7 +527,7 @@ mod tests {
         let furnished = daemon.handle(wire::Call { caller: second.clone(), query: wire::Query::Furnish(furnish_request()) });
         assert!(matches!(furnished, wire::Response::Furnished(_)), "same login lost ownership: {furnished:?}");
 
-        let current = daemon.memory.configuration.revision.clone();
+        let current = daemon.memory.configuration.configuration_revision.clone();
         let configured = daemon.configure(meta::MetaCall { caller: second, query: meta::Query::Configure(meta::ConfigureRequest {
             configuration_revision_option: Some(current), set: meta::Set::RepositoryPolling(meta::Timeout(200)),
         }) });
@@ -533,10 +535,10 @@ mod tests {
         let unconditional = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(1001) }, query: meta::Query::Configure(meta::ConfigureRequest {
             configuration_revision_option: None, set: meta::Set::RepositoryPolling(meta::Timeout(250)),
         }) });
-        let expected_revision = daemon.memory.configuration.revision.clone();
+        let expected_revision = daemon.memory.configuration.configuration_revision.clone();
         assert!(matches!(unconditional, meta::Response::Configured(meta::ConfiguredState { configuration_revision, .. }) if configuration_revision == expected_revision));
         let refused = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(2000), process_id: translator::ProcessId(999) }, query: meta::Query::Configure(meta::ConfigureRequest {
-            configuration_revision_option: Some(daemon.memory.configuration.revision.clone()), set: meta::Set::RepositoryPolling(meta::Timeout(300)),
+            configuration_revision_option: Some(daemon.memory.configuration.configuration_revision.clone()), set: meta::Set::RepositoryPolling(meta::Timeout(300)),
         }) });
         assert!(matches!(refused, meta::Response::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(_))));
     }
@@ -545,7 +547,7 @@ mod tests {
     fn configured_direct_peers_are_isolated_by_peer_id() {
         let mut image = ready_memory();
         let peer_two = translator::PeerBinding { peer_id: translator::PeerId("other".into()), peer_identity: translator::PeerIdentity { user_id: translator::UserId(1000), process_id: translator::ProcessId(55) } };
-        image.configuration.ordinary_peers.as_mut().unwrap().0.push(peer_two);
+        image.configuration.first_peer_list_option.as_mut().unwrap().0.push(peer_two);
         let effects = FakeEffects {
             replies: [
                 emission::Response::Snapshotted(snapshot("one", "one")),
@@ -596,7 +598,7 @@ mod tests {
             matches!(response, wire::Response::Registered(wire::RepositoryState { source_revision: wire::SourceRevision(ref value), .. }) if value == "two")
         );
         assert_eq!(
-            daemon.memory.repositories[0].snapshot.source_revision,
+            daemon.memory.stored_repository_vector[0].source_snapshot.source_revision,
             wire::SourceRevision("two".into())
         );
     }
@@ -627,9 +629,9 @@ mod tests {
             response,
             wire::Response::MemoryAfterPublication(_)
         ));
-        assert!(daemon.memory.workspaces[0].pending.is_some());
-        assert!(daemon.store.image.as_ref().unwrap().workspaces[0]
-            .pending
+        assert!(daemon.memory.stored_workspace_vector[0].publication_option.is_some());
+        assert!(daemon.store.image.as_ref().unwrap().stored_workspace_vector[0]
+            .publication_option
             .is_some());
     }
 
@@ -656,7 +658,7 @@ mod tests {
             query: wire::Query::Furnish(furnish_request()),
         });
         let durable = first.store.image.clone().unwrap();
-        let pending = durable.workspaces[0].pending.clone().unwrap();
+        let pending = durable.stored_workspace_vector[0].publication_option.clone().unwrap();
         let inspection = emission::PublicationInspection {
             workspace: workspace(),
             publication_identity_option: Some(emission::PublicationIdentity {
@@ -680,8 +682,8 @@ mod tests {
             ..Default::default()
         };
         let second = Daemon::start(bootstrap(), effects, memory).unwrap();
-        assert!(second.memory.workspaces[0].pending.is_none());
-        assert!(second.memory.workspaces[0].successful.is_some());
+        assert!(second.memory.stored_workspace_vector[0].publication_option.is_none());
+        assert!(second.memory.stored_workspace_vector[0].furnished_workspace_option.is_some());
         assert!(second.effects.calls.iter().all(|query| {
             !matches!(query, emission::Query::Publish(_))
         }));
@@ -705,7 +707,7 @@ mod tests {
             daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
             wire::Response::Furnished(_)
         ));
-        let old = daemon.memory.workspaces[0].successful.clone().unwrap();
+        let old = daemon.memory.stored_workspace_vector[0].furnished_workspace_option.clone().unwrap();
         let committed = Arc::new(Mutex::new(None));
         daemon.store.committed = Some(committed.clone());
         daemon.store.commit_then_panic_at = Some(daemon.store.stores + 1);
@@ -714,9 +716,9 @@ mod tests {
         assert!(panic.is_err(), "fixture must stop after the newer source snapshot is durable");
 
         let durable = committed.lock().unwrap().clone().unwrap();
-        assert_eq!(durable.repositories[0].snapshot.source_revision, wire::SourceRevision("two".into()));
-        assert_eq!(durable.workspaces[0].successful, Some(old.clone()));
-        assert!(durable.workspaces[0].pending.is_none());
+        assert_eq!(durable.stored_repository_vector[0].source_snapshot.source_revision, wire::SourceRevision("two".into()));
+        assert_eq!(durable.stored_workspace_vector[0].furnished_workspace_option, Some(old.clone()));
+        assert!(durable.stored_workspace_vector[0].publication_option.is_none());
 
         let effects = FakeEffects { publish_from_query: true, ..Default::default() };
         let restarted = Daemon::start(
@@ -725,10 +727,10 @@ mod tests {
             FakeMemory { image: Some(durable), ..Default::default() },
         )
         .unwrap();
-        let recovered = restarted.memory.workspaces[0].successful.as_ref().unwrap();
+        let recovered = restarted.memory.stored_workspace_vector[0].furnished_workspace_option.as_ref().unwrap();
         assert_ne!(recovered.generation_id, old.generation_id);
         assert_eq!(recovered.publication_revision, wire::PublicationRevision(2));
-        assert!(restarted.memory.workspaces[0].pending.is_none());
+        assert!(restarted.memory.stored_workspace_vector[0].publication_option.is_none());
         assert_eq!(
             restarted.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
             1
@@ -760,7 +762,7 @@ mod tests {
             ));
         }
         let mut durable = daemon.memory.clone();
-        durable.repositories[0].snapshot = snapshot("two", "two");
+        durable.stored_repository_vector[0].source_snapshot = snapshot("two", "two");
 
         let restarted = Daemon::start(
             bootstrap(),
@@ -772,9 +774,9 @@ mod tests {
             restarted.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
             2
         );
-        assert!(restarted.memory.workspaces.iter().all(|workspace| {
-            workspace.pending.is_none()
-                && workspace.successful.as_ref().is_some_and(|value| value.publication_revision == wire::PublicationRevision(2))
+        assert!(restarted.memory.stored_workspace_vector.iter().all(|workspace| {
+            workspace.publication_option.is_none()
+                && workspace.furnished_workspace_option.as_ref().is_some_and(|value| value.publication_revision == wire::PublicationRevision(2))
         }));
     }
 
@@ -800,11 +802,11 @@ mod tests {
             daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
             wire::Response::Furnished(_)
         ));
-        let prior = daemon.memory.workspaces[0].successful.clone().unwrap();
+        let prior = daemon.memory.stored_workspace_vector[0].furnished_workspace_option.clone().unwrap();
         let mut durable = daemon.memory.clone();
-        durable.repositories.push(StoredRepository {
+        durable.stored_repository_vector.push(StoredRepository {
             owner: wire::Owner::Login(caller().user_id),
-            snapshot: conflicting_snapshot("other", "ambiguous"),
+            source_snapshot: conflicting_snapshot("other", "ambiguous"),
         });
 
         let restarted = Daemon::start(
@@ -813,8 +815,8 @@ mod tests {
             FakeMemory { image: Some(durable), ..Default::default() },
         )
         .expect("settled success with newly ambiguous sources is retry refusal, not corrupt Memory");
-        assert_eq!(restarted.memory.workspaces[0].successful, Some(prior));
-        assert!(restarted.memory.workspaces[0].pending.is_none());
+        assert_eq!(restarted.memory.stored_workspace_vector[0].furnished_workspace_option, Some(prior));
+        assert!(restarted.memory.stored_workspace_vector[0].publication_option.is_none());
         assert!(restarted.events.iter().any(|event| matches!(
             event.response,
             wire::Response::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Source, .. })
@@ -844,9 +846,9 @@ mod tests {
             daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
             wire::Response::Furnished(_)
         ));
-        let prior = daemon.memory.workspaces[0].successful.clone().unwrap();
+        let prior = daemon.memory.stored_workspace_vector[0].furnished_workspace_option.clone().unwrap();
         let mut durable = daemon.memory.clone();
-        durable.repositories[0].snapshot = snapshot("two", "two");
+        durable.stored_repository_vector[0].source_snapshot = snapshot("two", "two");
 
         let failed = Daemon::start(
             bootstrap(),
@@ -854,8 +856,8 @@ mod tests {
             FakeMemory { image: Some(durable), fail_at: Some(1), ..Default::default() },
         )
         .unwrap();
-        assert_eq!(failed.memory.workspaces[0].successful, Some(prior));
-        assert!(failed.memory.workspaces[0].pending.is_none());
+        assert_eq!(failed.memory.stored_workspace_vector[0].furnished_workspace_option, Some(prior));
+        assert!(failed.memory.stored_workspace_vector[0].publication_option.is_none());
         assert!(failed.events.iter().any(|event| matches!(
             event.response,
             wire::Response::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Memory, .. })
@@ -873,9 +875,9 @@ mod tests {
             recovered.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
             1
         );
-        assert!(recovered.memory.workspaces[0].pending.is_none());
+        assert!(recovered.memory.stored_workspace_vector[0].publication_option.is_none());
         assert_eq!(
-            recovered.memory.workspaces[0].successful.as_ref().unwrap().publication_revision,
+            recovered.memory.stored_workspace_vector[0].furnished_workspace_option.as_ref().unwrap().publication_revision,
             wire::PublicationRevision(2)
         );
     }
@@ -910,7 +912,7 @@ mod tests {
         )
         .unwrap();
         assert!(restarted.effects.calls.is_empty());
-        assert!(restarted.memory.workspaces[0].pending.is_none());
+        assert!(restarted.memory.stored_workspace_vector[0].publication_option.is_none());
     }
 
     #[test]
@@ -972,7 +974,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0].response, wire::Response::Changed(_)));
         assert_eq!(
-            daemon.memory.repositories[0].snapshot.source_revision,
+            daemon.memory.stored_repository_vector[0].source_snapshot.source_revision,
             wire::SourceRevision("two".into())
         );
     }
@@ -980,8 +982,8 @@ mod tests {
     #[test]
     fn subscriptions_project_initial_and_future_events_to_workspace_owner() {
         let mut image = ready_memory();
-        image.configuration.subscriber_capacity = Some(3);
-        image.configuration.ordinary_peers.as_mut().unwrap().0.push(translator::PeerBinding {
+        image.configuration.integer_option = Some(3);
+        image.configuration.first_peer_list_option.as_mut().unwrap().0.push(translator::PeerBinding {
             peer_id: translator::PeerId("other".into()),
             peer_identity: translator::PeerIdentity {
                 user_id: translator::UserId(1000),
@@ -1134,8 +1136,8 @@ mod tests {
         let events = daemon.drain(subscription.id).unwrap();
         assert!(!events.is_empty());
         assert!(events.iter().all(|event| matches!(event.response, wire::Response::RefurnishFailed(_))));
-        assert!(daemon.memory.workspaces[0].pending.is_some());
-        assert!(daemon.memory.workspaces[0].successful.is_some());
+        assert!(daemon.memory.stored_workspace_vector[0].publication_option.is_some());
+        assert!(daemon.memory.stored_workspace_vector[0].furnished_workspace_option.is_some());
         let reconnect = daemon.subscribe(wire::Owner::Login(caller().user_id)).unwrap_err();
         assert!(matches!(reconnect, wire::Refusal::SubscriberCapacityReached(1)));
         daemon.unsubscribe(subscription.id);
@@ -1146,7 +1148,7 @@ mod tests {
     #[test]
     fn unrelated_repository_retry_failure_exposes_only_workspace_and_category() {
         let mut image = ready_memory();
-        image.configuration.subscriber_capacity = Some(2);
+        image.configuration.integer_option = Some(2);
         let effects = FakeEffects {
             replies: [
                 emission::Response::Snapshotted(snapshot("one", "one")),
@@ -1275,7 +1277,7 @@ mod tests {
             ..Default::default()
         };
         let mut image = ready_memory();
-        image.configuration.ordinary_peers.as_mut().unwrap().0.push(translator::PeerBinding {
+        image.configuration.first_peer_list_option.as_mut().unwrap().0.push(translator::PeerBinding {
             peer_id: translator::PeerId("other".into()),
             peer_identity: translator::PeerIdentity {
                 user_id: translator::UserId(1000),
@@ -1316,7 +1318,7 @@ mod tests {
             ..Default::default()
         };
         let mut image = ready_memory();
-        image.configuration.retention =
+        image.configuration.retention_policy =
             meta::RetentionPolicy::KeepPrevious(meta::PositiveInteger(1));
         let memory = FakeMemory {
             image: Some(image),
@@ -1334,10 +1336,10 @@ mod tests {
             query: wire::Query::Furnish(furnish_request()),
         });
         assert!(matches!(response, wire::Response::Furnished(_)));
-        assert!(daemon.memory.workspaces[0].successful.is_some());
-        assert_eq!(daemon.memory.cleanup_maintenance.len(), 1);
-        assert_eq!(daemon.memory.cleanup_maintenance[0].publication_revision, wire::PublicationRevision(1));
-        assert!(daemon.memory.workspaces[0].pending.is_none());
+        assert!(daemon.memory.stored_workspace_vector[0].furnished_workspace_option.is_some());
+        assert_eq!(daemon.memory.cleanup_maintenance_vector.len(), 1);
+        assert_eq!(daemon.memory.cleanup_maintenance_vector[0].publication_revision, wire::PublicationRevision(1));
+        assert!(daemon.memory.stored_workspace_vector[0].publication_option.is_none());
         assert!(daemon
             .events
             .iter()
@@ -1355,8 +1357,8 @@ mod tests {
             .replies
             .push_back(emission::Response::Snapshotted(snapshot("one", "one")));
         daemon.poll_once();
-        assert!(daemon.memory.cleanup_maintenance.is_empty());
-        assert!(daemon.memory.workspaces[0].successful.is_some());
+        assert!(daemon.memory.cleanup_maintenance_vector.is_empty());
+        assert!(daemon.memory.stored_workspace_vector[0].furnished_workspace_option.is_some());
     }
 }
 
@@ -1413,7 +1415,7 @@ impl MemoryStore for FileMemory {
         let parent = self.path.parent().ok_or(MemoryError::Unavailable)?;
         fs::create_dir_all(parent).map_err(|_| MemoryError::Unavailable)?;
         let encoded = image.signalize().map_err(|_| MemoryError::Corrupt)?;
-        let temporary = parent.join(format!(".belief-memory-{}.pending", std::process::id()));
+        let temporary = parent.join(format!(".belief-memory-{}.publication_option", std::process::id()));
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -1434,54 +1436,40 @@ pub trait EmissionPort {
     fn emit(&mut self, attempt: emission::EmissionAttempt) -> emission::EmissionAttemptOutcome;
 }
 
-#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Configuration {
-    pub revision: meta::ConfigurationRevision,
-    pub repository_polling: Option<meta::Timeout>,
-    pub subscriber_capacity: Option<i64>,
-    pub ordinary_peers: Option<wire::PeerList>,
-    pub meta_peers: Option<wire::PeerList>,
-    pub layouts: Vec<meta::HarnessLayout>,
-    pub placements: Vec<meta::PlacementDefault>,
-    pub retention: meta::RetentionPolicy,
-    pub nexus_frame_capacity: Option<meta::ByteLimit>,
-    pub nexus_transport_timeout: Option<meta::Timeout>,
-    pub translator_sets: Vec<meta::Set>,
-}
 
 impl Configuration {
     fn empty() -> Self {
         Self {
-            revision: meta::ConfigurationRevision(0),
-            repository_polling: None,
-            subscriber_capacity: None,
-            ordinary_peers: None,
-            meta_peers: None,
-            layouts: Vec::new(),
-            placements: Vec::new(),
-            retention: meta::RetentionPolicy::KeepAll,
-            nexus_frame_capacity: None,
-            nexus_transport_timeout: None,
-            translator_sets: Vec::new(),
+            configuration_revision: meta::ConfigurationRevision(0),
+            first_timeout_option: None,
+            integer_option: None,
+            first_peer_list_option: None,
+            second_peer_list_option: None,
+            harness_layout_vector: Vec::new(),
+            placement_default_vector: Vec::new(),
+            retention_policy: meta::RetentionPolicy::KeepAll,
+            byte_limit_option: None,
+            second_timeout_option: None,
+            set_vector: Vec::new(),
         }
     }
 
     fn missing(&self) -> Vec<meta::SettingName> {
         let mut missing = Vec::new();
-        if self.repository_polling.is_none() {
+        if self.first_timeout_option.is_none() {
             missing.push(meta::SettingName::RepositoryPolling);
         }
-        if self.subscriber_capacity.is_none() {
+        if self.integer_option.is_none() {
             missing.push(meta::SettingName::SubscriberCapacity);
         }
-        if self.ordinary_peers.is_none() {
+        if self.first_peer_list_option.is_none() {
             missing.push(meta::SettingName::OrdinaryPeers);
         }
-        if self.meta_peers.is_none() {
+        if self.second_peer_list_option.is_none() {
             missing.push(meta::SettingName::MetaPeers);
         }
-        if self.nexus_frame_capacity.is_none() { missing.push(meta::SettingName::NexusFrameCapacity); }
-        if self.nexus_transport_timeout.is_none() { missing.push(meta::SettingName::NexusTransportTimeout); }
+        if self.byte_limit_option.is_none() { missing.push(meta::SettingName::NexusFrameCapacity); }
+        if self.second_timeout_option.is_none() { missing.push(meta::SettingName::NexusTransportTimeout); }
         missing.extend(self.translator_missing());
         missing
     }
@@ -1494,14 +1482,14 @@ impl Configuration {
             meta::SettingName::TranslatorTransportTimeout, meta::SettingName::AllowedNexusPeers,
             meta::SettingName::GitExecutable,
         ];
-        required.into_iter().filter(|name| !self.translator_sets.iter().any(|set| &setting_name(set) == name)).collect()
+        required.into_iter().filter(|name| !self.set_vector.iter().any(|set| &setting_name(set) == name)).collect()
     }
 
     fn translator_configuration(&self) -> meta::TranslatorConfiguration {
         let missing = self.translator_missing();
         meta::TranslatorConfiguration {
-            configuration_revision: self.revision.clone(),
-            set_vector: self.translator_sets.clone(),
+            configuration_revision: self.configuration_revision.clone(),
+            set_vector: self.set_vector.clone(),
             readiness: if missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(missing) },
         }
     }
@@ -1520,66 +1508,28 @@ impl Configuration {
     }
 
     fn layout_for(&self, harness: &wire::Harness) -> Option<meta::Layout> {
-        self.layouts.iter().find(|value| &value.harness == harness).map(|value| value.layout.clone())
+        self.harness_layout_vector.iter().find(|value| &value.harness == harness).map(|value| value.layout.clone())
     }
 
     fn placement_defaults(&self) -> HashMap<wire::Kind, wire::Placement> {
-        self.placements.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect()
+        self.placement_default_vector.iter().map(|value| (value.kind.clone(), value.placement.clone())).collect()
     }
 }
 
-#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StoredRepository {
-    pub owner: wire::Owner,
-    pub snapshot: emission::SourceSnapshot,
-}
 
-#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct StoredWorkspace {
-    pub owner: wire::Owner,
-    pub request: wire::FurnishRequest,
-    pub configuration_revision: meta::ConfigurationRevision,
-    pub layout: meta::Layout,
-    pub placement_defaults: Vec<meta::PlacementDefault>,
-    pub retention: meta::RetentionPolicy,
-    pub successful: Option<wire::FurnishedWorkspace>,
-    pub successful_history: Vec<SuccessfulGeneration>,
-    pub successful_basis: Vec<wire::RepositoryState>,
-    pub pending: Option<emission::Publication>,
-}
 
-#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct SuccessfulGeneration {
-    pub generation_id: wire::GenerationId,
-    pub publication_revision: wire::PublicationRevision,
-}
 
-#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct CleanupMaintenance {
-    pub workspace: wire::Workspace,
-    pub generation_id: wire::GenerationId,
-    pub publication_revision: wire::PublicationRevision,
-}
 
-#[derive(Archive, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct MemoryImage {
-    pub owner: wire::Owner,
-    pub configuration: Configuration,
-    pub repositories: Vec<StoredRepository>,
-    pub workspaces: Vec<StoredWorkspace>,
-    pub cleanup_maintenance: Vec<CleanupMaintenance>,
-    pub next_event_sequence: i64,
-}
 
 impl MemoryImage {
     fn empty(owner: wire::Owner) -> Self {
         Self {
             owner,
             configuration: Configuration::empty(),
-            repositories: Vec::new(),
-            workspaces: Vec::new(),
-            cleanup_maintenance: Vec::new(),
-            next_event_sequence: 1,
+            stored_repository_vector: Vec::new(),
+            stored_workspace_vector: Vec::new(),
+            cleanup_maintenance_vector: Vec::new(),
+            integer: 1,
         }
     }
 }
@@ -1649,7 +1599,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             let Some(stored) = self.workspace(&workspace).cloned() else {
                 continue;
             };
-            if stored.pending.is_some() {
+            if stored.publication_option.is_some() {
                 continue;
             }
             let owner = stored.owner.clone();
@@ -1659,7 +1609,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     user_id: translator::UserId(0),
                     process_id: translator::ProcessId(0),
                 },
-                stored.request,
+                stored.furnish_request,
             ) {
                 self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
                     workspace,
@@ -1670,7 +1620,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     fn emit_effect(&mut self, query: emission::Query) -> emission::Response {
-        let revision = self.memory.configuration.revision.clone();
+        let revision = self.memory.configuration.configuration_revision.clone();
         let attempt = emission::EmissionAttempt {
             configuration_revision: revision.clone(),
             translator_configuration: self.memory.configuration.translator_configuration(),
@@ -1697,7 +1647,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             wire::Query::Resolve(names) => {
                 if self
                     .memory
-                    .repositories
+                    .stored_repository_vector
                     .iter()
                     .any(|repository| !same_owner(&repository.owner, &owner))
                 {
@@ -1738,7 +1688,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn polling_timeout(&self) -> Option<meta::Timeout> {
-        self.memory.configuration.repository_polling.clone()
+        self.memory.configuration.first_timeout_option.clone()
     }
 
     pub fn configure(&mut self, call: meta::MetaCall) -> meta::Response {
@@ -1749,12 +1699,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         let meta::Query::Configure(request) = call.query;
         if request.configuration_revision_option.as_ref().is_some_and(|expected|
-            expected != &self.memory.configuration.revision)
+            expected != &self.memory.configuration.configuration_revision)
         {
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::StaleRevision(
                 meta::StaleRevision {
                     configuration_revision_option: request.configuration_revision_option,
-                    configuration_revision: self.memory.configuration.revision.clone(),
+                    configuration_revision: self.memory.configuration.configuration_revision.clone(),
                 },
             ));
         }
@@ -1781,38 +1731,38 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let previous = self.memory.configuration.clone();
         match &set {
             meta::Set::RepositoryPolling(value) => {
-                self.memory.configuration.repository_polling = Some(value.clone())
+                self.memory.configuration.first_timeout_option = Some(value.clone())
             }
             meta::Set::SubscriberCapacity(value) => {
-                self.memory.configuration.subscriber_capacity = Some(*value)
+                self.memory.configuration.integer_option = Some(*value)
             }
             meta::Set::OrdinaryPeers(value) => {
-                self.memory.configuration.ordinary_peers = Some(value.clone())
+                self.memory.configuration.first_peer_list_option = Some(value.clone())
             }
             meta::Set::MetaPeers(value) => {
-                self.memory.configuration.meta_peers = Some(value.clone())
+                self.memory.configuration.second_peer_list_option = Some(value.clone())
             }
             meta::Set::Layout(value) => {
-                self.memory.configuration.layouts.retain(|current| current.harness != value.harness);
-                self.memory.configuration.layouts.push(value.clone());
+                self.memory.configuration.harness_layout_vector.retain(|current| current.harness != value.harness);
+                self.memory.configuration.harness_layout_vector.push(value.clone());
             }
             meta::Set::Placement(value) => {
-                self.memory.configuration.placements.retain(|current| current.kind != value.kind);
-                self.memory.configuration.placements.push(value.clone());
+                self.memory.configuration.placement_default_vector.retain(|current| current.kind != value.kind);
+                self.memory.configuration.placement_default_vector.push(value.clone());
             }
             meta::Set::GenerationRetention(value) => {
-                self.memory.configuration.retention = value.clone()
+                self.memory.configuration.retention_policy = value.clone()
             }
-            meta::Set::NexusFrameCapacity(value) => self.memory.configuration.nexus_frame_capacity = Some(value.clone()),
-            meta::Set::NexusTransportTimeout(value) => self.memory.configuration.nexus_transport_timeout = Some(value.clone()),
+            meta::Set::NexusFrameCapacity(value) => self.memory.configuration.byte_limit_option = Some(value.clone()),
+            meta::Set::NexusTransportTimeout(value) => self.memory.configuration.second_timeout_option = Some(value.clone()),
             _ if setting_owner(&set) == meta::Keeper::Translator => {
                 let name = setting_name(&set);
-                self.memory.configuration.translator_sets.retain(|current| setting_name(current) != name);
-                self.memory.configuration.translator_sets.push(set.clone());
+                self.memory.configuration.set_vector.retain(|current| setting_name(current) != name);
+                self.memory.configuration.set_vector.push(set.clone());
             }
             _ => unreachable!("all Nexus-owned settings are handled above"),
         }
-        self.memory.configuration.revision.0 += 1;
+        self.memory.configuration.configuration_revision.0 += 1;
         if self.persist().is_err() {
             self.memory.configuration = previous;
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
@@ -1821,7 +1771,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         meta::Response::Configured(meta::ConfiguredState {
             set,
             keeper,
-            configuration_revision: self.memory.configuration.revision.clone(),
+            configuration_revision: self.memory.configuration.configuration_revision.clone(),
             readiness: self.memory.configuration.readiness(),
         })
     }
@@ -1838,10 +1788,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     pub fn recover_pending(&mut self) -> Vec<wire::Response> {
         let workspaces: Vec<_> = self
             .memory
-            .workspaces
+            .stored_workspace_vector
             .iter()
-            .filter(|record| record.pending.is_some())
-            .map(|record| record.request.workspace.clone())
+            .filter(|record| record.publication_option.is_some())
+            .map(|record| record.furnish_request.workspace.clone())
             .collect();
         workspaces
             .into_iter()
@@ -1854,12 +1804,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.watch_failures.clear();
         let repositories: Vec<_> = self
             .memory
-            .repositories
+            .stored_repository_vector
             .iter()
             .map(|stored| {
                 (
-                    stored.snapshot.repository.clone(),
-                    stored.snapshot.source_revision.clone(),
+                    stored.source_snapshot.repository.clone(),
+                    stored.source_snapshot.source_revision.clone(),
                 )
             })
             .collect();
@@ -1898,7 +1848,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .filter(|event| same_owner(&event.owner, &subscriber.owner))
             .cloned()
             .collect();
-        subscriber.after = self.memory.next_event_sequence - 1;
+        subscriber.after = self.memory.integer - 1;
         self.prune_events();
         Some(events)
     }
@@ -1918,14 +1868,14 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .values()
             .map(|subscriber| subscriber.after)
             .min()
-            .unwrap_or(self.memory.next_event_sequence - 1);
+            .unwrap_or(self.memory.integer - 1);
         self.events.retain(|event| event.sequence > after);
     }
 
     fn register(&mut self, owner: wire::Owner, caller: translator::Caller, repository: wire::Repository) -> wire::Response {
         if self
             .memory
-            .repositories
+            .stored_repository_vector
             .iter()
             .any(|stored| !same_owner(&stored.owner, &owner))
         {
@@ -1958,7 +1908,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let revision = self
             .repository(&repository)
             .expect("registered repository")
-            .snapshot
+            .source_snapshot
             .source_revision
             .clone();
         wire::Response::Registered(wire::RepositoryState {
@@ -1975,11 +1925,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let previous = self.memory.clone();
         self.core.observe(snapshot.clone().into()).map_err(|_| ())?;
         if let Some(stored) = self.repository_mut(&snapshot.repository) {
-            stored.snapshot = snapshot;
+            stored.source_snapshot = snapshot;
         } else {
             self.memory
-                .repositories
-                .push(StoredRepository { owner, snapshot });
+                .stored_repository_vector
+                .push(StoredRepository { owner, source_snapshot: snapshot });
         }
         self.sort();
         if self.persist().is_err() {
@@ -1999,20 +1949,20 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         }
         if self
             .workspace(&request.workspace)
-            .is_some_and(|stored| stored.pending.is_some())
+            .is_some_and(|stored| stored.publication_option.is_some())
         {
             return wire::Response::Refused(wire::Refusal::NotReady);
         }
         if self
             .memory
-            .cleanup_maintenance
+            .cleanup_maintenance_vector
             .iter()
             .any(|maintenance| maintenance.workspace == request.workspace)
         {
             self.retry_cleanup_workspace(&request.workspace);
             if self
                 .memory
-                .cleanup_maintenance
+                .cleanup_maintenance_vector
                 .iter()
                 .any(|maintenance| maintenance.workspace == request.workspace)
             {
@@ -2020,11 +1970,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             }
         }
         let previous = self.memory.clone();
-        let revision = self.memory.configuration.revision.clone();
+        let revision = self.memory.configuration.configuration_revision.clone();
         let Some(layout) = self.memory.configuration.layout_for(&request.harness) else { return wire::Response::Refused(wire::Refusal::NotReady) };
-        let placement_defaults = self.memory.configuration.placements.clone();
+        let placement_defaults = self.memory.configuration.placement_default_vector.clone();
         let defaults = self.memory.configuration.placement_defaults();
-        let retention = self.memory.configuration.retention.clone();
+        let retention = self.memory.configuration.retention_policy.clone();
         let plan = match self.core.prepare_furnish_with_defaults(request.clone(), &defaults) {
             Ok(plan) => plan,
             Err(error) => return wire::Response::Refused(resolve_refusal(error)),
@@ -2043,24 +1993,24 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         };
         if let Some(stored) = self.workspace_mut(&request.workspace) {
             stored.owner = owner;
-            stored.request = request.clone();
+            stored.furnish_request = request.clone();
             stored.configuration_revision = revision;
             stored.layout = layout;
-            stored.placement_defaults = placement_defaults;
-            stored.retention = retention;
-            stored.pending = Some(publication.clone());
+            stored.placement_default_vector = placement_defaults;
+            stored.retention_policy = retention;
+            stored.publication_option = Some(publication.clone());
         } else {
-            self.memory.workspaces.push(StoredWorkspace {
+            self.memory.stored_workspace_vector.push(StoredWorkspace {
                 owner,
-                request: request.clone(),
+                furnish_request: request.clone(),
                 configuration_revision: revision,
                 layout,
-                placement_defaults,
-                retention,
-                successful: None,
-                successful_history: Vec::new(),
-                successful_basis: Vec::new(),
-                pending: Some(publication.clone()),
+                placement_default_vector: placement_defaults,
+                retention_policy: retention,
+                furnished_workspace_option: None,
+                successful_generation_vector: Vec::new(),
+                repository_state_vector: Vec::new(),
+                publication_option: Some(publication.clone()),
             });
         }
         self.sort();
@@ -2086,19 +2036,19 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 let before = self.workspace(&state.workspace).cloned();
                 let owner = before.as_ref().map(|stored| stored.owner.clone());
                 if let Some(stored) = self.workspace_mut(&state.workspace) {
-                    if let Some(previous) = stored.successful.take() {
-                        stored.successful_history.push(SuccessfulGeneration {
+                    if let Some(previous) = stored.furnished_workspace_option.take() {
+                        stored.successful_generation_vector.push(SuccessfulGeneration {
                             generation_id: previous.generation_id,
                             publication_revision: previous.publication_revision,
                         });
                     }
-                    stored.successful = Some(furnished.clone());
-                    stored.successful_basis = stored
-                        .pending
+                    stored.furnished_workspace_option = Some(furnished.clone());
+                    stored.repository_state_vector = stored
+                        .publication_option
                         .as_ref()
                         .map(|pending| pending.repository_states.0.clone())
                         .unwrap_or_default();
-                    stored.pending = None;
+                    stored.publication_option = None;
                 }
                 if let Err(error) = self.persist() {
                     if let Some(before) = before {
@@ -2140,13 +2090,13 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     fn clean_after_success(&mut self, furnished: &wire::FurnishedWorkspace) {
         if self
             .workspace(&furnished.workspace)
-            .is_some_and(|stored| stored.pending.is_some())
+            .is_some_and(|stored| stored.publication_option.is_some())
         {
             return;
         }
         if self
             .memory
-            .cleanup_maintenance
+            .cleanup_maintenance_vector
             .iter()
             .any(|maintenance| maintenance.workspace == furnished.workspace)
         {
@@ -2165,10 +2115,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             generation_id: target.generation_id,
             publication_revision: target.publication_revision,
         };
-        self.memory.cleanup_maintenance.push(maintenance.clone());
+        self.memory.cleanup_maintenance_vector.push(maintenance.clone());
         if self.persist().is_err() {
             self.memory
-                .cleanup_maintenance
+                .cleanup_maintenance_vector
                 .retain(|value| value != &maintenance);
             return;
         }
@@ -2179,24 +2129,24 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let Some(stored) = self.workspace(workspace) else {
             return Vec::new();
         };
-        let keep = match self.memory.configuration.retention {
+        let keep = match self.memory.configuration.retention_policy {
             meta::RetentionPolicy::KeepAll => return Vec::new(),
             meta::RetentionPolicy::KeepPrevious(ref value) => value.0.max(1) as usize,
         };
-        let total = stored.successful_history.len() + usize::from(stored.successful.is_some());
+        let total = stored.successful_generation_vector.len() + usize::from(stored.furnished_workspace_option.is_some());
         let removable = total.saturating_sub(keep);
         let protected: Vec<_> = self
             .memory
-            .workspaces
+            .stored_workspace_vector
             .iter()
-            .filter_map(|record| record.pending.as_ref())
+            .filter_map(|record| record.publication_option.as_ref())
             .map(|pending| emission::PublicationIdentity {
                 generation_id: pending.generation_id.clone(),
                 publication_revision: pending.intended_publication.0.clone(),
             })
             .collect();
         stored
-            .successful_history
+            .successful_generation_vector
             .iter()
             .take(removable)
             .filter(|generation| !protected.contains(&emission::PublicationIdentity {
@@ -2229,12 +2179,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 let previous = self.memory.clone();
                 if let Some(stored) = self.workspace_mut(&maintenance.workspace) {
                     stored
-                        .successful_history
+                        .successful_generation_vector
                         .retain(|generation| generation.generation_id != maintenance.generation_id
                             || generation.publication_revision != maintenance.publication_revision);
                 }
                 self.memory
-                    .cleanup_maintenance
+                    .cleanup_maintenance_vector
                     .retain(|value| value != &maintenance);
                 if self.persist().is_err() {
                     self.memory = previous;
@@ -2258,8 +2208,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             emission::InspectionRequest {
                 workspace: workspace.clone(),
                 publication_identity: emission::PublicationIdentity {
-                    generation_id: stored.pending.as_ref()?.generation_id.clone(),
-                    publication_revision: stored.pending.as_ref()?.intended_publication.0.clone(),
+                    generation_id: stored.publication_option.as_ref()?.generation_id.clone(),
+                    publication_revision: stored.publication_option.as_ref()?.intended_publication.0.clone(),
                 },
                 layout: stored.layout.clone(),
             },
@@ -2270,19 +2220,19 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     Ok(RecoveryOutcome::Finalized(furnished)) => {
                         let previous = self.memory.clone();
                         if let Some(record) = self.workspace_mut(workspace) {
-                            if let Some(previous) = record.successful.take() {
-                                record.successful_history.push(SuccessfulGeneration {
+                            if let Some(previous) = record.furnished_workspace_option.take() {
+                                record.successful_generation_vector.push(SuccessfulGeneration {
                                     generation_id: previous.generation_id,
                                     publication_revision: previous.publication_revision,
                                 });
                             }
-                            record.successful = Some(furnished.clone());
-                            record.successful_basis = record
-                                .pending
+                            record.furnished_workspace_option = Some(furnished.clone());
+                            record.repository_state_vector = record
+                                .publication_option
                                 .as_ref()
                                 .map(|pending| pending.repository_states.0.clone())
                                 .unwrap_or_default();
-                            record.pending = None;
+                            record.publication_option = None;
                         }
                         if self.persist().is_err() {
                             self.memory = previous;
@@ -2308,7 +2258,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                         Some(wire::Response::Furnished(furnished))
                     }
                     Ok(RecoveryOutcome::Retry) => {
-                        stored.pending.map(|pending| self.publish(pending))
+                        stored.publication_option.map(|pending| self.publish(pending))
                     }
                     Err(_) => Some(wire::Response::Refused(file_refusal(workspace.clone()))),
                 }
@@ -2335,7 +2285,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             }
         };
         if let Some(stored) = self.repository_mut(&repository) {
-            stored.snapshot = snapshot;
+            stored.source_snapshot = snapshot;
         }
         if self.persist().is_err() {
             self.memory = previous;
@@ -2349,7 +2299,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 continue;
             };
             let owner = stored.owner.clone();
-            match self.furnish(owner.clone(), translator::Caller { user_id: translator::UserId(0), process_id: translator::ProcessId(0) }, stored.request) {
+            match self.furnish(owner.clone(), translator::Caller { user_id: translator::UserId(0), process_id: translator::ProcessId(0) }, stored.furnish_request) {
                 wire::Response::Furnished(_) => {}
                 wire::Response::Refused(refusal) => {
                     self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
@@ -2363,7 +2313,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn subscribe(&mut self, owner: wire::Owner) -> Result<Subscription, wire::Refusal> {
-        let capacity = self.memory.configuration.subscriber_capacity.unwrap_or(0);
+        let capacity = self.memory.configuration.integer_option.unwrap_or(0);
         if self.subscribers.len() as i64 >= capacity {
             return Err(wire::Refusal::SubscriberCapacityReached(capacity));
         }
@@ -2379,7 +2329,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         );
         if self.persist().is_err() {
             self.subscribers.remove(&id);
-            self.memory.next_event_sequence -= 1;
+            self.memory.integer -= 1;
             return Err(memory_refusal(wire::MemoryOperation::Recording));
         }
         Ok(Subscription { id, initial })
@@ -2388,10 +2338,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     fn state(&self, owner: &wire::Owner) -> Vec<wire::FurnishedWorkspace> {
         let mut furnished: Vec<_> = self
             .memory
-            .workspaces
+            .stored_workspace_vector
             .iter()
             .filter(|workspace| same_owner(&workspace.owner, owner))
-            .filter_map(|workspace| workspace.successful.clone())
+            .filter_map(|workspace| workspace.furnished_workspace_option.clone())
             .collect();
         furnished.sort_by_key(|value| value.workspace.0 .0.clone());
         furnished
@@ -2402,23 +2352,23 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         if self.persist().is_ok() {
             self.events.push(event);
         } else {
-            self.memory.next_event_sequence -= 1;
+            self.memory.integer -= 1;
         }
     }
 
     fn next_event(&mut self, owner: wire::Owner, response: wire::Response) -> Event {
-        let sequence = self.memory.next_event_sequence;
-        self.memory.next_event_sequence += 1;
+        let sequence = self.memory.integer;
+        self.memory.integer += 1;
         Event { sequence, owner, response }
     }
 
     fn retry_pending_events(&mut self) {
         let workspaces: Vec<_> = self
             .memory
-            .workspaces
+            .stored_workspace_vector
             .iter()
-            .filter(|record| record.pending.is_some())
-            .map(|record| record.request.workspace.clone())
+            .filter(|record| record.publication_option.is_some())
+            .map(|record| record.furnish_request.workspace.clone())
             .collect();
         for workspace in workspaces {
             let owner = self.workspace(&workspace).map(|record| record.owner.clone());
@@ -2439,7 +2389,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     fn retry_cleanup_maintenance(&mut self) {
         let workspaces: Vec<_> = self
             .memory
-            .cleanup_maintenance
+            .cleanup_maintenance_vector
             .iter()
             .map(|maintenance| maintenance.workspace.clone())
             .collect();
@@ -2451,10 +2401,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     fn maintain_workspaces(&mut self) {
         let furnished: Vec<_> = self
             .memory
-            .workspaces
+            .stored_workspace_vector
             .iter()
-            .filter(|record| record.pending.is_none())
-            .filter_map(|record| record.successful.clone())
+            .filter(|record| record.publication_option.is_none())
+            .filter_map(|record| record.furnished_workspace_option.clone())
             .collect();
         for workspace in furnished {
             self.clean_after_success(&workspace);
@@ -2464,13 +2414,13 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     fn retry_cleanup_workspace(&mut self, workspace: &wire::Workspace) {
         if self
             .workspace(workspace)
-            .is_some_and(|record| record.pending.is_some())
+            .is_some_and(|record| record.publication_option.is_some())
         {
             return;
         }
         let Some(maintenance) = self
             .memory
-            .cleanup_maintenance
+            .cleanup_maintenance_vector
             .iter()
             .find(|maintenance| &maintenance.workspace == workspace)
             .cloned()
@@ -2487,7 +2437,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         } else {
             let previous = self.memory.clone();
             self.memory
-                .cleanup_maintenance
+                .cleanup_maintenance_vector
                 .retain(|value| value != &maintenance);
             if self.persist().is_err() {
                 self.memory = previous;
@@ -2500,7 +2450,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn direct_owner(&self, caller: &translator::Caller) -> Option<wire::Owner> {
-        self.memory.configuration.ordinary_peers.as_ref().and_then(|peers| peer_owner(peers, caller))
+        self.memory.configuration.first_peer_list_option.as_ref().and_then(|peers| peer_owner(peers, caller))
     }
 
     pub fn login_owner(&self, caller: &translator::Caller) -> Option<wire::Owner> {
@@ -2511,44 +2461,44 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     fn owner_allowed(&self, owner: &wire::Owner) -> bool {
         match owner {
             wire::Owner::Login(_) => owner == &self.memory.owner,
-            wire::Owner::Peer(peer_id) => self.memory.configuration.ordinary_peers.as_ref().is_some_and(|peers| peers.0.iter().any(|peer| &peer.peer_id == peer_id)),
+            wire::Owner::Peer(peer_id) => self.memory.configuration.first_peer_list_option.as_ref().is_some_and(|peers| peers.0.iter().any(|peer| &peer.peer_id == peer_id)),
         }
     }
 
     fn repository(&self, repository: &wire::Repository) -> Option<&StoredRepository> {
         self.memory
-            .repositories
+            .stored_repository_vector
             .iter()
-            .find(|stored| &stored.snapshot.repository == repository)
+            .find(|stored| &stored.source_snapshot.repository == repository)
     }
 
     fn repository_mut(&mut self, repository: &wire::Repository) -> Option<&mut StoredRepository> {
         self.memory
-            .repositories
+            .stored_repository_vector
             .iter_mut()
-            .find(|stored| &stored.snapshot.repository == repository)
+            .find(|stored| &stored.source_snapshot.repository == repository)
     }
 
     fn workspace(&self, workspace: &wire::Workspace) -> Option<&StoredWorkspace> {
         self.memory
-            .workspaces
+            .stored_workspace_vector
             .iter()
-            .find(|stored| &stored.request.workspace == workspace)
+            .find(|stored| &stored.furnish_request.workspace == workspace)
     }
 
     fn workspace_mut(&mut self, workspace: &wire::Workspace) -> Option<&mut StoredWorkspace> {
         self.memory
-            .workspaces
+            .stored_workspace_vector
             .iter_mut()
-            .find(|stored| &stored.request.workspace == workspace)
+            .find(|stored| &stored.furnish_request.workspace == workspace)
     }
 
     fn sort(&mut self) {
         self.memory
-            .repositories
-            .sort_by_key(|value| value.snapshot.repository.0 .0.clone());
+            .stored_repository_vector
+            .sort_by_key(|value| value.source_snapshot.repository.0 .0.clone());
         self.memory
-            .workspaces
-            .sort_by_key(|value| value.request.workspace.0 .0.clone());
+            .stored_workspace_vector
+            .sort_by_key(|value| value.furnish_request.workspace.0 .0.clone());
     }
 }
