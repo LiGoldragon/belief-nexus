@@ -1764,6 +1764,109 @@ mod tests {
     }
 
     #[test]
+    fn published_state_completes_only_the_attempted_workspace() {
+        let refusal_for = |workspace| emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            workspace,
+            publication_operation: emission::PublicationOperation::StagingGeneration,
+            publication_evidence: emission::PublicationEvidence::PermissionDenied,
+        }));
+        let first = workspace_named("first");
+        let second = workspace_named("second");
+        let absent = workspace_named("absent");
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                refusal_for(first.clone()),
+            ].into(),
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        ).unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("first")) }),
+            wire::Response::Refused(wire::Refusal::File(_))
+        ));
+        daemon.effects.replies.push_back(refusal_for(second.clone()));
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("second")) }),
+            wire::Response::Refused(wire::Refusal::File(_))
+        ));
+
+        let first_publication = daemon.workspace(&first).unwrap().pending.clone().unwrap();
+        let second_publication = daemon.workspace(&second).unwrap().pending.clone().unwrap();
+        let expected_memory = daemon.memory.clone();
+        let expected_store_image = daemon.store.image.clone();
+        let expected_stores = daemon.store.stores;
+        let expected_first = daemon.core.pending_intent(&first).cloned();
+        let expected_second = daemon.core.pending_intent(&second).cloned();
+
+        macro_rules! assert_unchanged {
+            () => {
+                assert_eq!(daemon.memory, expected_memory);
+                assert_eq!(daemon.store.image, expected_store_image);
+                assert_eq!(daemon.store.stores, expected_stores);
+                assert_eq!(daemon.core.pending_intent(&first), expected_first.as_ref());
+                assert_eq!(daemon.core.pending_intent(&second), expected_second.as_ref());
+                assert!(daemon.core.successful_publication(&first).is_none());
+                assert!(daemon.core.successful_publication(&second).is_none());
+            };
+        }
+
+        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+            workspace: second.clone(),
+            publication_identity: emission::PublicationIdentity {
+                generation_id: second_publication.generation_id.clone(),
+                publication_revision: second_publication.intended_publication.0.clone(),
+            },
+        }));
+        assert!(matches!(daemon.publish(first_publication.clone()), wire::Response::Refused(wire::Refusal::NotReady)));
+        assert_unchanged!();
+
+        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+            workspace: absent,
+            publication_identity: emission::PublicationIdentity {
+                generation_id: wire::GenerationId("absent".into()),
+                publication_revision: wire::PublicationRevision(1),
+            },
+        }));
+        assert!(matches!(daemon.publish(first_publication.clone()), wire::Response::Refused(wire::Refusal::NotReady)));
+        assert_unchanged!();
+
+        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+            workspace: first.clone(),
+            publication_identity: emission::PublicationIdentity {
+                generation_id: wire::GenerationId("wrong".into()),
+                publication_revision: first_publication.intended_publication.0.clone(),
+            },
+        }));
+        assert!(matches!(
+            daemon.publish(first_publication.clone()),
+            wire::Response::Refused(wire::Refusal::File(wire::FileFailure { workspace, .. })) if workspace == first
+        ));
+        assert_unchanged!();
+
+        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+            workspace: first.clone(),
+            publication_identity: emission::PublicationIdentity {
+                generation_id: first_publication.generation_id.clone(),
+                publication_revision: first_publication.intended_publication.0.clone(),
+            },
+        }));
+        assert!(matches!(daemon.publish(first_publication), wire::Response::Furnished(wire::FurnishedWorkspace { workspace, .. }) if workspace == first));
+        assert!(daemon.core.pending_intent(&first).is_none());
+        assert!(daemon.core.successful_publication(&first).is_some());
+        assert_eq!(daemon.core.pending_intent(&second), expected_second.as_ref());
+        assert!(daemon.core.successful_publication(&second).is_none());
+        assert_eq!(daemon.store.stores, expected_stores + 2);
+        assert_eq!(daemon.store.image, Some(daemon.memory.clone()));
+    }
+
+    #[test]
     fn unrelated_repository_retry_failure_exposes_only_workspace_and_category() {
         let mut image = ready_memory();
         image.configuration.subscriber_capacity = Some(2);
@@ -2713,7 +2816,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     fn publish(&mut self, publication: emission::Publication) -> wire::Response {
         let requested_workspace = publication.workspace.clone();
         match self.emit_effect(emission::Query::Publish(publication)) {
-            emission::Response::Published(state) => {
+            emission::Response::Published(state) if state.workspace == requested_workspace => {
                 let furnished = match self.core.complete_publication(&state) {
                     Ok(furnished) => furnished,
                     Err(_) => return wire::Response::Refused(file_refusal(state.workspace)),
