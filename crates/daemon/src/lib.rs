@@ -1548,6 +1548,89 @@ mod tests {
     }
 
     #[test]
+    fn publication_refusals_are_bound_to_the_requested_workspace() {
+        let wrong_workspace_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            workspace: workspace_named("other"),
+            publication_operation: emission::PublicationOperation::ReplacingPointer,
+            publication_evidence: emission::PublicationEvidence::PermissionDenied,
+        }));
+        let wrong_variant_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+            repository: repository(),
+            source_operation: emission::SourceOperation::ReadingMain,
+            source_evidence: emission::SourceEvidence::MainUnavailable,
+        }));
+        let matching_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            workspace: workspace(),
+            publication_operation: emission::PublicationOperation::ReplacingPointer,
+            publication_evidence: emission::PublicationEvidence::PermissionDenied,
+        }));
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                wrong_workspace_refusal(),
+            ].into(),
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        ).unwrap();
+        register(&mut daemon);
+
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Refused(wire::Refusal::NotReady)
+        ));
+
+        let expected_memory = daemon.memory.clone();
+        let expected_store_image = daemon.store.image.clone();
+        let expected_stores = daemon.store.stores;
+        let expected_pending = daemon.core.pending_intent(&workspace()).cloned();
+        let expected_requested = daemon.core.requested(&workspace()).map(<[_]>::to_vec);
+        let expected_retry = daemon.core.retry_workspaces();
+        let pending = expected_pending.as_ref().expect("furnish recorded a pending publication").publication.clone();
+
+        macro_rules! assert_unchanged {
+            () => {
+                assert_eq!(daemon.memory, expected_memory);
+                assert_eq!(daemon.store.image, expected_store_image);
+                assert_eq!(daemon.store.stores, expected_stores);
+                assert_eq!(daemon.core.pending_intent(&workspace()), expected_pending.as_ref());
+                assert_eq!(daemon.core.requested(&workspace()).map(<[_]>::to_vec), expected_requested);
+                assert_eq!(daemon.core.retry_workspaces(), expected_retry);
+            };
+        }
+
+        for malformed in [wrong_workspace_refusal(), wrong_variant_refusal()] {
+            daemon.effects.replies.push_back(malformed);
+            assert!(matches!(daemon.publish(pending.clone()), wire::Response::Refused(wire::Refusal::NotReady)));
+            assert_unchanged!();
+        }
+        daemon.effects.replies.push_back(matching_refusal());
+        assert!(matches!(
+            daemon.publish(pending.clone()),
+            wire::Response::Refused(wire::Refusal::File(wire::FileFailure { workspace: failed_workspace, .. }))
+                if failed_workspace == workspace()
+        ));
+        assert_unchanged!();
+
+        for malformed in [wrong_workspace_refusal(), wrong_variant_refusal()] {
+            daemon.effects.replies.push_back(malformed);
+            assert!(matches!(daemon.recover_one(&workspace()), Some(wire::Response::Refused(wire::Refusal::NotReady))));
+            assert_unchanged!();
+        }
+        daemon.effects.replies.push_back(matching_refusal());
+        assert!(matches!(
+            daemon.recover_one(&workspace()),
+            Some(wire::Response::Refused(wire::Refusal::File(wire::FileFailure { workspace: failed_workspace, .. })))
+                if failed_workspace == workspace()
+        ));
+        assert_unchanged!();
+    }
+
+    #[test]
     fn unrelated_repository_retry_failure_exposes_only_workspace_and_category() {
         let mut image = ready_memory();
         image.configuration.subscriber_capacity = Some(2);
@@ -2491,6 +2574,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     fn publish(&mut self, publication: emission::Publication) -> wire::Response {
+        let requested_workspace = publication.workspace.clone();
         match self.emit_effect(emission::Query::Publish(publication)) {
             emission::Response::Published(state) => {
                 let furnished = match self.core.complete_publication(&state) {
@@ -2544,8 +2628,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 self.clean_after_success(&furnished);
                 wire::Response::Furnished(furnished)
             }
-            emission::Response::EmissionRefused(refusal) => {
-                wire::Response::Refused(map_emission(refusal))
+            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(refusal))
+                if refusal.workspace == requested_workspace =>
+            {
+                wire::Response::Refused(map_emission(emission::EmissionRefusal::Publication(refusal)))
             }
             _ => wire::Response::Refused(wire::Refusal::NotReady),
         }
@@ -2730,8 +2816,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     Err(_) => Some(wire::Response::Refused(file_refusal(workspace.clone()))),
                 }
             }
-            emission::Response::EmissionRefused(refusal) => {
-                Some(wire::Response::Refused(map_emission(refusal)))
+            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(refusal))
+                if refusal.workspace == *workspace =>
+            {
+                Some(wire::Response::Refused(map_emission(emission::EmissionRefusal::Publication(refusal))))
             }
             _ => Some(wire::Response::Refused(wire::Refusal::NotReady)),
         }
