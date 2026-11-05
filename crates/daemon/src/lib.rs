@@ -542,6 +542,28 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_configuration_revision_refuses_before_mutating_persisted_memory() {
+        let mut image = ready_memory();
+        image.configuration.revision = meta::ConfigurationRevision(i64::MAX);
+        let expected = image.clone();
+        let memory = FakeMemory { image: Some(image), ..Default::default() };
+        let mut daemon = Daemon::start(bootstrap(), FakeEffects::default(), memory).unwrap();
+
+        let response = daemon.configure(meta::MetaCall {
+            caller: caller(),
+            query: meta::Query::Configure(meta::ConfigureRequest {
+                configuration_revision_option: Some(meta::ConfigurationRevision(i64::MAX)),
+                set: meta::Set::RepositoryPolling(meta::Timeout(200)),
+            }),
+        });
+
+        assert!(matches!(response, meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable)));
+        assert_eq!(daemon.memory, expected);
+        assert_eq!(daemon.store.image, Some(expected));
+        assert_eq!(daemon.store.stores, 0);
+    }
+
+    #[test]
     fn configured_direct_peers_are_isolated_by_peer_id() {
         let mut image = ready_memory();
         let peer_two = translator::PeerBinding { peer_id: translator::PeerId("other".into()), peer_identity: translator::PeerIdentity { user_id: translator::UserId(1000), process_id: translator::ProcessId(55) } };
@@ -1778,6 +1800,9 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 },
             ));
         }
+        let Some(next_revision) = self.memory.configuration.revision.0.checked_add(1) else {
+            return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
+        };
         let previous = self.memory.configuration.clone();
         match &set {
             meta::Set::RepositoryPolling(value) => {
@@ -1812,7 +1837,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             }
             _ => unreachable!("all Nexus-owned settings are handled above"),
         }
-        self.memory.configuration.revision.0 += 1;
+        self.memory.configuration.revision.0 = next_revision;
         if self.persist().is_err() {
             self.memory.configuration = previous;
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
