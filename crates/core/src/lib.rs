@@ -292,18 +292,6 @@ impl BeliefCore {
         })
     }
 
-    #[cfg(test)]
-    pub fn prepare_furnish(&mut self, request: wire::FurnishRequest) -> Result<FurnishPlan, ResolveError> {
-        let defaults = HashMap::from([
-            (wire::Kind::Spirit, wire::Placement::SystemPrompt),
-            (wire::Kind::Intent, wire::Placement::SystemPrompt),
-            (wire::Kind::Vision, wire::Placement::Skills),
-            (wire::Kind::Knowledge, wire::Placement::Skills),
-            (wire::Kind::Role, wire::Placement::Skills),
-        ]);
-        self.prepare_furnish_with_defaults(request, &defaults)
-    }
-
     /// Persists the exact publication intent in domain state before returning the
     /// effect.  The caller must durably record this state before it emits Publish.
     pub fn begin_publication(
@@ -887,6 +875,26 @@ fn workspace_key(workspace: &wire::Workspace) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_defaults() -> HashMap<wire::Kind, wire::Placement> {
+        HashMap::from([
+            (wire::Kind::Spirit, wire::Placement::SystemPrompt),
+            (wire::Kind::Intent, wire::Placement::SystemPrompt),
+            (wire::Kind::Vision, wire::Placement::Skills),
+            (wire::Kind::Knowledge, wire::Placement::Skills),
+            (wire::Kind::Role, wire::Placement::Skills),
+        ])
+    }
+
+    trait PrepareWithTestDefaults {
+        fn prepare_furnish(&mut self, request: wire::FurnishRequest) -> Result<FurnishPlan, ResolveError>;
+    }
+
+    impl PrepareWithTestDefaults for BeliefCore {
+        fn prepare_furnish(&mut self, request: wire::FurnishRequest) -> Result<FurnishPlan, ResolveError> {
+            self.prepare_furnish_with_defaults(request, &test_defaults())
+        }
+    }
 
     fn name(kind: wire::Kind, subject: &str) -> wire::ModuleName {
         wire::ModuleName {

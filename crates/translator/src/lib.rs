@@ -699,19 +699,14 @@ mod tests {
     }
 
     #[test]
-    fn old_attempt_keeps_its_snapshot_across_reconfiguration() {
+    fn emission_outcome_carries_the_attempt_revision() {
         let caller = current_caller();
         let query = emission_belief_nexus::Query::Snapshot(public::Repository(public::RepositoryPath("/definitely/missing".into())));
-        let old = emission_belief_nexus::EmissionAttempt {
+        let attempt = emission_belief_nexus::EmissionAttempt {
             configuration_revision: meta::ConfigurationRevision(7),
             translator_configuration: complete_snapshot(7, &caller), query,
         };
-        // A later ingress configuration exists independently. The admitted
-        // attempt remains wholly described by the immutable snapshot it carries.
-        let mut current = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
-        assert_eq!(current.revision(), Some(&meta::ConfigurationRevision(8)));
-        current.snapshot_ready = false;
-        let answer = execute_emission(archive(&old).unwrap(), &caller).unwrap();
+        let answer = execute_emission(archive(&attempt).unwrap(), &caller).unwrap();
         let outcome = Signal::<emission_belief_nexus::EmissionAttemptOutcome>::from(answer).restore().unwrap();
         assert_eq!(outcome.configuration_revision, meta::ConfigurationRevision(7));
     }
