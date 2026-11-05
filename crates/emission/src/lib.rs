@@ -576,7 +576,10 @@ fn placement_from_frontmatter(
 ) -> Result<Option<signal_belief_nexus::Placement>, InvalidModule> {
     let mut lines = content.lines();
     if lines.next() != Some("---") { return Ok(None); }
-    let frontmatter = lines.take_while(|line| *line != "---");
+    let Some(frontmatter_length) = lines.clone().position(|line| line == "---") else {
+        return Ok(None);
+    };
+    let frontmatter = lines.take(frontmatter_length);
     let mut found = None;
     for line in frontmatter {
         let Some((key, raw)) = line.split_once(':') else { continue };
@@ -1068,8 +1071,10 @@ mod tests {
         let name = signal_belief_nexus::ModuleName { kind: signal_belief_nexus::Kind::Vision, subject: signal_belief_nexus::Subject("nexus".into()) };
         let path = signal_belief_nexus::RelativePath("vision/nexus.md".into());
         assert_eq!(placement_from_frontmatter("body", &name, &path).unwrap(), None);
+        assert_eq!(placement_from_frontmatter("---\nbody\nplacement: skills", &name, &path).unwrap(), None);
         assert_eq!(placement_from_frontmatter("---\nplacement: system-prompt\n---\nbody", &name, &path).unwrap(), Some(signal_belief_nexus::Placement::SystemPrompt));
         assert_eq!(placement_from_frontmatter("---\nplacement: skills\n---\nbody", &name, &path).unwrap(), Some(signal_belief_nexus::Placement::Skills));
+        assert_eq!(placement_from_frontmatter("---\n---\nplacement: skills", &name, &path).unwrap(), None);
         assert!(matches!(placement_from_frontmatter("---\nplacement: elsewhere\n---", &name, &path).unwrap_err().invalid_placement, InvalidPlacement::Unknown(_)));
         assert!(matches!(placement_from_frontmatter("---\nplacement: [skills]\n---", &name, &path).unwrap_err().invalid_placement, InvalidPlacement::NonScalar));
         assert!(matches!(placement_from_frontmatter("---\nplacement: skills\nplacement: system-prompt\n---", &name, &path).unwrap_err().invalid_placement, InvalidPlacement::Duplicate));
