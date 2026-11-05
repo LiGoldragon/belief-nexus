@@ -4,7 +4,7 @@ use signal::{
 };
 use signal_belief_nexus as wire;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
@@ -35,6 +35,10 @@ fn direct_peer_child() {
         let wire::Response::Furnished(furnished) = response else { panic!("configured direct Furnish failed: {response:?}") };
         assert_eq!(furnished.workspace, workspace);
         assert!(Path::new(&(furnished.furnished_paths.system_prompt_path.0)).exists());
+        assert_eq!(
+            PathBuf::from(&furnished.furnished_paths.skills_path.0),
+            PathBuf::from(&workspace.0 .0).join(".agents/skills"),
+        );
         assert!(Path::new(&(furnished.furnished_paths.skills_path.0)).exists());
         let claude_workspace = wire::Workspace(wire::WorkspacePath(std::env::var("BELIEF_DIRECT_CLAUDE_WORKSPACE").unwrap()));
         let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller, query: wire::Query::Furnish(wire::FurnishRequest {
@@ -47,6 +51,10 @@ fn direct_peer_child() {
         let wire::Response::Furnished(furnished) = response else { panic!("configured direct Claude Furnish failed: {response:?}") };
         assert_eq!(furnished.workspace, claude_workspace);
         assert!(Path::new(&(furnished.furnished_paths.system_prompt_path.0)).exists());
+        assert_eq!(
+            PathBuf::from(&furnished.furnished_paths.skills_path.0),
+            PathBuf::from(&claude_workspace.0 .0).join(".claude/skills"),
+        );
         assert!(Path::new(&(furnished.furnished_paths.skills_path.0)).exists());
     } else {
         let workspace = wire::Workspace(wire::WorkspacePath(std::env::var("BELIEF_DIRECT_WORKSPACE").unwrap()));

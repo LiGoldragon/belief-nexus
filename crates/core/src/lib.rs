@@ -597,9 +597,10 @@ fn furnished_paths(workspace: &wire::Workspace, layout: &meta::Layout) -> wire::
     let owned = layout.owned_root.0 .0.trim_matches('/');
     let current = layout.current_link.0 .0.trim_matches('/');
     let instructions = layout.instructions_file.0 .0.trim_matches('/');
+    let skills = layout.skills_directory.0 .0.trim_matches('/');
     wire::FurnishedPaths {
         system_prompt_path: wire::SystemPromptPath(format!("{root}/{owned}/{current}/{instructions}")),
-        skills_path: wire::SkillsPath(format!("{root}/{owned}/{current}/skills")),
+        skills_path: wire::SkillsPath(format!("{root}/{skills}")),
     }
 }
 
