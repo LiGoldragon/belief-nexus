@@ -699,6 +699,55 @@ mod tests {
     }
 
     #[test]
+    fn register_refusals_are_bound_to_the_requested_repository() {
+        let wrong_repository = emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+            repository: other_repository(),
+            source_operation: emission::SourceOperation::ReadingMain,
+            source_evidence: emission::SourceEvidence::MainUnavailable,
+        }));
+        let wrong_variant = emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            workspace: workspace(),
+            publication_operation: emission::PublicationOperation::StagingGeneration,
+            publication_evidence: emission::PublicationEvidence::PermissionDenied,
+        }));
+        let matching = emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+            repository: repository(),
+            source_operation: emission::SourceOperation::ReadingMain,
+            source_evidence: emission::SourceEvidence::MainUnavailable,
+        }));
+
+        for (reply, matches_request) in [(wrong_repository, false), (wrong_variant, false), (matching, true)] {
+            let initial = ready_memory();
+            let expected_resolution = wire::Resolution { found_vector: Vec::new(), module_name_vector: vec![module()] };
+            let mut daemon = Daemon::start(
+                bootstrap(),
+                FakeEffects { replies: [reply].into(), ..Default::default() },
+                FakeMemory { image: Some(initial.clone()), ..Default::default() },
+            ).unwrap();
+
+            let response = daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(repository()) });
+
+            if matches_request {
+                assert!(matches!(
+                    response,
+                    wire::Response::Refused(wire::Refusal::Source(wire::SourceFailure {
+                        repository: failed_repository,
+                        source_operation: wire::SourceOperation::Snapshotting,
+                        source_evidence: wire::SourceEvidence::MainUnavailable,
+                    })) if failed_repository == repository()
+                ));
+            } else {
+                assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotReady)));
+            }
+            assert_eq!(daemon.memory, initial);
+            assert_eq!(daemon.store.image, Some(initial));
+            assert_eq!(daemon.store.stores, 0);
+            assert_eq!(daemon.core.resolve(&[module()]).unwrap(), expected_resolution);
+            assert!(daemon.core.retry_workspaces().is_empty());
+        }
+    }
+
+    #[test]
     fn register_handoff_ignores_a_snapshot_for_another_repository() {
         let effects = FakeEffects {
             replies: [
@@ -1289,6 +1338,90 @@ mod tests {
             daemon.watch_failures,
             vec![watch_unavailable(repository(), Some(wire::SourceRevision("one".into())))]
         );
+    }
+
+    #[test]
+    fn watch_refusals_are_bound_to_the_requested_repository() {
+        let effects = FakeEffects {
+            replies: [
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+            ].into(),
+            publish_from_query: true,
+            ..Default::default()
+        };
+        let mut daemon = Daemon::start(
+            bootstrap(),
+            effects,
+            FakeMemory { image: Some(ready_memory()), ..Default::default() },
+        ).unwrap();
+        register(&mut daemon);
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(other_repository()) }),
+            wire::Response::Registered(_)
+        ));
+        assert!(matches!(
+            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
+            wire::Response::Furnished(_)
+        ));
+        let before = daemon.memory.clone();
+        let stores = daemon.store.stores;
+        let requested = daemon.core.requested(&workspace()).map(<[_]>::to_vec);
+        let retry = daemon.core.retry_workspaces();
+        let resolution = daemon.core.resolve(&[module()]).unwrap();
+        let unchanged_other = || emission::Response::Snapshotted(other_snapshot("other-one", "other"));
+        let malformed = [
+            emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+                repository: other_repository(),
+                source_operation: emission::SourceOperation::ReadingMain,
+                source_evidence: emission::SourceEvidence::MainUnavailable,
+            })),
+            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+                workspace: workspace(),
+                publication_operation: emission::PublicationOperation::StagingGeneration,
+                publication_evidence: emission::PublicationEvidence::PermissionDenied,
+            })),
+        ];
+
+        for refusal in malformed {
+            daemon.effects.replies.extend([refusal, unchanged_other()]);
+            assert!(daemon.poll_once().is_empty());
+            assert_eq!(
+                daemon.watch_failures,
+                vec![watch_unavailable(repository(), Some(wire::SourceRevision("one".into())))]
+            );
+            assert_eq!(daemon.memory, before);
+            assert_eq!(daemon.store.stores, stores);
+            assert_eq!(daemon.core.requested(&workspace()).map(<[_]>::to_vec), requested);
+            assert_eq!(daemon.core.retry_workspaces(), retry);
+            assert_eq!(daemon.core.resolve(&[module()]).unwrap(), resolution);
+        }
+
+        daemon.effects.replies.extend([
+            emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+                repository: repository(),
+                source_operation: emission::SourceOperation::ReadingTree,
+                source_evidence: emission::SourceEvidence::MainUnavailable,
+            })),
+            unchanged_other(),
+        ]);
+        assert!(daemon.poll_once().is_empty());
+        assert_eq!(daemon.watch_failures, vec![WatchFailure {
+            repository: repository(),
+            source_revision_option: Some(wire::SourceRevision("one".into())),
+            source_failure: wire::SourceFailure {
+                repository: repository(),
+                source_operation: wire::SourceOperation::Watching,
+                source_evidence: wire::SourceEvidence::MainUnavailable,
+            },
+        }]);
+        assert_eq!(daemon.memory, before);
+        assert_eq!(daemon.store.stores, stores);
+        assert_eq!(daemon.core.requested(&workspace()).map(<[_]>::to_vec), requested);
+        assert_eq!(daemon.core.retry_workspaces(), retry);
+        assert_eq!(daemon.core.resolve(&[module()]).unwrap(), resolution);
     }
 
     #[test]
@@ -2366,7 +2499,9 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 emission::Response::Snapshotted(snapshot)
                     if snapshot.source_revision == old_revision => {}
                 emission::Response::Snapshotted(snapshot) => self.apply_snapshot(snapshot),
-                emission::Response::EmissionRefused(emission::EmissionRefusal::Source(source)) => {
+                emission::Response::EmissionRefused(emission::EmissionRefusal::Source(source))
+                    if source.repository == repository =>
+                {
                     let failure = map_source(source, wire::SourceOperation::Watching);
                     self.watch_failures.push(WatchFailure {
                         repository,
@@ -2437,8 +2572,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let first = match self.emit_effect(emission::Query::Snapshot(repository.clone()))
         {
             emission::Response::Snapshotted(snapshot) if snapshot.repository == repository => snapshot,
-            emission::Response::EmissionRefused(refusal) => {
-                return wire::Response::Refused(map_emission(refusal));
+            emission::Response::EmissionRefused(emission::EmissionRefusal::Source(refusal))
+                if refusal.repository == repository =>
+            {
+                return wire::Response::Refused(map_emission(emission::EmissionRefusal::Source(refusal)));
             }
             _ => return wire::Response::Refused(wire::Refusal::NotReady),
         };
