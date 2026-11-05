@@ -494,8 +494,7 @@ impl FileEmission {
             .and_then(|_| fs::create_dir_all(paths.skills_link.parent().expect("skills has parent")))
             .map_err(|error| publication_refusal(publication, operation.clone(), io_evidence(&paths.workspace, error)))?;
 
-        let current = paths.inspect_current(publication)
-            .map_err(|evidence| publication_refusal(publication, PublicationOperation::InspectingPointer, evidence))?;
+        let current = paths.inspect_current(publication)?;
         let observed = current.as_ref().map(|(_, manifest)| (manifest.intended_publication.0).clone());
         if observed != publication.prior_publication.0 {
             return Err(publication_refusal(
@@ -523,8 +522,7 @@ impl FileEmission {
             generation
         };
 
-        paths.replace_current(publication, &generation)
-            .map_err(|evidence| publication_refusal(publication, PublicationOperation::ReplacingPointer, evidence))?;
+        paths.replace_current(publication, &generation)?;
         Ok(PublicationState {
             workspace: publication.workspace.clone(),
             publication_identity: identity,
@@ -548,17 +546,13 @@ impl FileEmission {
                 publication_evidence: evidence,
             }));
         }
-        match paths.inspect_untrusted() {
+        match paths.inspect_untrusted(&request.workspace) {
             Ok((pointer, manifest)) => Response::Inspected(PublicationInspection {
                 workspace: request.workspace,
                 publication_identity_option: pointer,
                 publication_manifest_option: manifest,
             }),
-            Err(evidence) => Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
-                workspace: request.workspace,
-                publication_operation: PublicationOperation::InspectingManifest,
-                publication_evidence: evidence,
-            })),
+            Err(refusal) => Response::EmissionRefused(EmissionRefusal::Publication(refusal)),
         }
     }
 
@@ -568,7 +562,7 @@ impl FileEmission {
             Ok(paths) => paths,
             Err(evidence) => return Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         };
-        match paths.cleanup(&request.publication_identity) {
+        match paths.cleanup(&request.publication_identity, &request.workspace) {
             Ok(cleanup_outcome) => Response::Cleaned(CleanupState {
                 workspace: request.workspace, publication_identity: request.publication_identity, cleanup_outcome,
             }),
@@ -894,51 +888,71 @@ impl PublicationPaths {
         result
     }
 
-    fn replace_current(&self, publication: &Publication, generation: &Path) -> Result<(), PublicationEvidence> {
+    fn replace_current(&self, publication: &Publication, generation: &Path) -> Result<(), PublicationRefusal> {
         let observed = self.inspect_current(publication)?.map(|(_, manifest)| manifest.intended_publication.0);
         if observed != publication.prior_publication.0 {
-            return Err(PublicationEvidence::PriorRevisionMismatch(RevisionEvidence {
-                expected_revision: ExpectedRevision(publication.prior_publication.0.clone()),
-                observed_revision: ObservedRevision(observed),
-            }));
+            return Err(publication_refusal(
+                publication,
+                PublicationOperation::ReplacingPointer,
+                PublicationEvidence::PriorRevisionMismatch(RevisionEvidence {
+                    expected_revision: ExpectedRevision(publication.prior_publication.0.clone()),
+                    observed_revision: ObservedRevision(observed),
+                }),
+            ));
         }
-        let relative = generation.strip_prefix(&self.owned).map_err(|_| boundary(&self.owned, generation))?;
-        let address = self.publication_component(&publication.identity())?;
+        let relative = generation.strip_prefix(&self.owned)
+            .map_err(|_| publication_refusal(publication, PublicationOperation::ReplacingPointer, boundary(&self.owned, generation)))?;
+        let address = self.publication_component(&publication.identity())
+            .map_err(|evidence| publication_refusal(publication, PublicationOperation::ReplacingPointer, evidence))?;
         let temporary = self.owned.join(format!(".current-{address}-{}", std::process::id()));
-        symlink(relative, &temporary).map_err(|error| io_evidence(&temporary, error))?;
-        fs::rename(&temporary, &self.current).map_err(|error| io_evidence(&self.current, error))?;
-        sync_directory(&self.owned).map_err(|error| io_evidence(&self.owned, error))
+        symlink(relative, &temporary)
+            .map_err(|error| publication_refusal(publication, PublicationOperation::ReplacingPointer, io_evidence(&temporary, error)))?;
+        fs::rename(&temporary, &self.current)
+            .map_err(|error| publication_refusal(publication, PublicationOperation::ReplacingPointer, io_evidence(&self.current, error)))?;
+        sync_directory(&self.owned)
+            .map_err(|error| publication_refusal(publication, PublicationOperation::ReplacingPointer, io_evidence(&self.owned, error)))
     }
 
-    fn inspect_current(&self, publication: &Publication) -> Result<Option<(PublicationIdentity, PublicationManifest)>, PublicationEvidence> {
-        let (pointer, manifest) = self.inspect_untrusted()?;
+    fn inspect_current(&self, publication: &Publication) -> Result<Option<(PublicationIdentity, PublicationManifest)>, PublicationRefusal> {
+        let (pointer, manifest) = self.inspect_untrusted(&publication.workspace)?;
         match (pointer, manifest) {
             (None, None) => Ok(None),
             (Some(pointer), Some(manifest)) if pointer.generation_id == manifest.generation_id && pointer.publication_revision == manifest.intended_publication.0 => Ok(Some((pointer, manifest))),
-            _ => Err(PublicationEvidence::ManifestMismatch),
+            _ => Err(publication_refusal(publication, PublicationOperation::InspectingManifest, PublicationEvidence::ManifestMismatch)),
         }
-        .map_err(|evidence| { let _ = publication; evidence })
     }
 
-    fn inspect_untrusted(&self) -> Result<(Option<PublicationIdentity>, Option<PublicationManifest>), PublicationEvidence> {
+    fn inspect_untrusted(
+        &self,
+        workspace: &signal_belief_nexus::Workspace,
+    ) -> Result<(Option<PublicationIdentity>, Option<PublicationManifest>), PublicationRefusal> {
         let target = match fs::read_link(&self.current) {
             Ok(target) => target,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
-            Err(error) => return Err(io_evidence(&self.current, error)),
+            Err(error) => return Err(inspection_refusal(workspace, PublicationOperation::InspectingPointer, io_evidence(&self.current, error))),
         };
         let absolute = self.owned.join(&target);
-        let relative = absolute.strip_prefix(&self.generations).map_err(|_| boundary(&self.generations, &absolute))?;
-        if relative.components().count() != 1 { return Err(boundary(&self.generations, &absolute)); }
-        let (_, manifest) = self.inspect_candidate(&absolute)?.ok_or(PublicationEvidence::ManifestMismatch)?;
+        let relative = absolute.strip_prefix(&self.generations)
+            .map_err(|_| inspection_refusal(workspace, PublicationOperation::InspectingPointer, boundary(&self.generations, &absolute)))?;
+        if relative.components().count() != 1 {
+            return Err(inspection_refusal(workspace, PublicationOperation::InspectingPointer, boundary(&self.generations, &absolute)));
+        }
+        let (_, manifest) = self.inspect_candidate(&absolute)
+            .map_err(|evidence| inspection_refusal(workspace, PublicationOperation::InspectingManifest, evidence))?
+            .ok_or_else(|| inspection_refusal(workspace, PublicationOperation::InspectingManifest, PublicationEvidence::ManifestMismatch))?;
         let pointer = manifest.identity();
         Ok((Some(pointer), Some(manifest)))
     }
 
-    fn cleanup(&self, target: &PublicationIdentity) -> Result<CleanupOutcome, PublicationEvidence> {
+    fn cleanup(
+        &self,
+        target: &PublicationIdentity,
+        workspace: &signal_belief_nexus::Workspace,
+    ) -> Result<CleanupOutcome, PublicationEvidence> {
         let Some(resolved) = self.resolve_publication(target)? else { return Ok(CleanupOutcome::AlreadyAbsent); };
         // Observation alone authorizes nothing. Re-read the owned pointer
         // immediately before the one exact removal and refuse its target.
-        let current = self.inspect_untrusted()?.0;
+        let current = self.inspect_untrusted(workspace).map_err(|refusal| refusal.publication_evidence)?.0;
         if current.as_ref() == Some(target) { return Err(PublicationEvidence::OwnedPointerMismatch); }
         fs::remove_dir_all(&resolved.path).map_err(|error| io_evidence(&resolved.path, error))?;
         sync_directory(&self.generations).map_err(|error| io_evidence(&self.generations, error))?;
@@ -1032,6 +1046,14 @@ fn io_evidence(path: &Path, error: std::io::Error) -> PublicationEvidence {
 
 fn publication_refusal(publication: &Publication, operation: PublicationOperation, evidence: PublicationEvidence) -> PublicationRefusal {
     PublicationRefusal { workspace: publication.workspace.clone(), publication_operation: operation, publication_evidence: evidence }
+}
+
+fn inspection_refusal(
+    workspace: &signal_belief_nexus::Workspace,
+    operation: PublicationOperation,
+    evidence: PublicationEvidence,
+) -> PublicationRefusal {
+    PublicationRefusal { workspace: workspace.clone(), publication_operation: operation, publication_evidence: evidence }
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -1198,6 +1220,77 @@ mod tests {
         });
         let archived = response.signalize().expect("archive inspection");
         assert_eq!(Signal::<Response>::from(archived.bytes().to_vec()).restore().unwrap(), response);
+    }
+
+    #[test]
+    fn publish_and_inspect_preserve_pointer_and_manifest_failure_stages() {
+        fn request(publication: &Publication) -> InspectionRequest {
+            InspectionRequest {
+                workspace: publication.workspace.clone(),
+                publication_identity: publication.identity(),
+                layout: publication.workspace_image.layout.clone(),
+            }
+        }
+
+        fn assert_operation(response: Response, expected: PublicationOperation) {
+            assert!(matches!(
+                response,
+                Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+                    publication_operation,
+                    ..
+                })) if publication_operation == expected
+            ));
+        }
+
+        let emission = FileEmission::new(PathBuf::from("git")).unwrap();
+        for publish in [false, true] {
+            for pointer in ["file", "escape"] {
+                let workspace = tempfile::tempdir().unwrap();
+                fs::create_dir_all(workspace.path().join(".belief/generations")).unwrap();
+                let current = workspace.path().join(".belief/current");
+                if pointer == "file" {
+                    fs::write(current, "not a pointer").unwrap();
+                } else {
+                    symlink("../outside", current).unwrap();
+                }
+                let publication = publication(workspace.path(), "requested", None, 1, "instructions", vec![]);
+                let response = if publish {
+                    emission.execute(Query::Publish(publication))
+                } else {
+                    emission.execute(Query::InspectPublication(request(&publication)))
+                };
+                assert_operation(response, PublicationOperation::InspectingPointer);
+            }
+
+            for manifest in ["missing", "corrupt"] {
+                let workspace = tempfile::tempdir().unwrap();
+                let generation = workspace.path().join(".belief/generations/broken");
+                fs::create_dir_all(&generation).unwrap();
+                if manifest == "corrupt" {
+                    fs::write(generation.join("manifest.signal"), "not a manifest").unwrap();
+                }
+                symlink("generations/broken", workspace.path().join(".belief/current")).unwrap();
+                let publication = publication(workspace.path(), "requested", None, 1, "instructions", vec![]);
+                let response = if publish {
+                    emission.execute(Query::Publish(publication))
+                } else {
+                    emission.execute(Query::InspectPublication(request(&publication)))
+                };
+                assert_operation(response, PublicationOperation::InspectingManifest);
+            }
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let publication = publication(workspace.path(), "valid", None, 1, "instructions", vec![]);
+        assert!(matches!(emission.execute(Query::Publish(publication.clone())), Response::Published(_)));
+        assert!(matches!(
+            emission.execute(Query::InspectPublication(request(&publication))),
+            Response::Inspected(PublicationInspection {
+                publication_identity_option: Some(_),
+                publication_manifest_option: Some(_),
+                ..
+            })
+        ));
     }
 
     #[test]
