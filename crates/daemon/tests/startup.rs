@@ -446,3 +446,88 @@ fn a_valid_direct_bootstrap_does_prepare_and_bind() {
     );
     assert!(tree.path().join("custom-state/memory").exists());
 }
+
+/// The published 0.3.0 `NexusBootstrap`, field for field, from meta-signal-belief-nexus at
+/// `9c90892` src/lib.rs. One representative retained old frame, sent where the envelope belongs.
+mod previous {
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct SocketPath(pub String);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct OrdinarySocket(pub SocketPath);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct MetaSocket(pub SocketPath);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct EmissionTranslatorSocket(pub SocketPath);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct MemoryPath(pub String);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct ByteLimit(pub i64);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct Timeout(pub i64);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct Admission {
+        pub byte_limit: ByteLimit,
+        pub timeout: Timeout,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct PairedTranslator {
+        pub user_id: translator::UserId,
+        pub group_id: translator::GroupId,
+        pub process_id: translator::ProcessId,
+    }
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct BootstrapOwner(pub signal_belief_nexus::Owner);
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    pub struct NexusBootstrap {
+        pub ordinary_socket: OrdinarySocket,
+        pub meta_socket: MetaSocket,
+        pub emission_translator_socket: EmissionTranslatorSocket,
+        pub memory_path: MemoryPath,
+        pub admission: Admission,
+        pub paired_translator: PairedTranslator,
+        pub bootstrap_owner: BootstrapOwner,
+    }
+}
+
+#[test]
+fn a_retained_old_bootstrap_sent_as_the_first_frame_is_refused_before_any_effect() {
+    let tree = Tree::new();
+    let runtime = tree.runtime();
+    let old = previous::NexusBootstrap {
+        ordinary_socket: previous::OrdinarySocket(previous::SocketPath(
+            runtime.join("ordinary.sock").to_string_lossy().into_owned(),
+        )),
+        meta_socket: previous::MetaSocket(previous::SocketPath(
+            runtime.join("meta.sock").to_string_lossy().into_owned(),
+        )),
+        emission_translator_socket: previous::EmissionTranslatorSocket(previous::SocketPath(
+            runtime
+                .join("translator.sock")
+                .to_string_lossy()
+                .into_owned(),
+        )),
+        memory_path: previous::MemoryPath(
+            tree.state().join("memory").to_string_lossy().into_owned(),
+        ),
+        admission: previous::Admission {
+            byte_limit: previous::ByteLimit(1_000_000),
+            timeout: previous::Timeout(1_000),
+        },
+        paired_translator: previous::PairedTranslator {
+            user_id: user(),
+            group_id: translator::GroupId(0),
+            process_id: translator::ProcessId(1),
+        },
+        bootstrap_owner: previous::BootstrapOwner(wire::Owner::Login(user())),
+    };
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&old)
+        .unwrap()
+        .to_vec();
+    let mut child = spawn();
+    frame(&mut child, bytes);
+    assert!(exits(&mut child), "the old frame is not an envelope");
+    assert!(
+        nothing_made(&tree),
+        "no directory, socket or store was made"
+    );
+}

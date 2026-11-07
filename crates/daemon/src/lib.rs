@@ -73,9 +73,7 @@ fn validate_bootstrap(value: &meta::NexusBootstrap) -> Result<(), BootstrapError
     {
         return Err(BootstrapError::SocketCollision);
     }
-    if value.admission.byte_limit.0 <= 0 || value.admission.timeout.0 <= 0 {
-        return Err(BootstrapError::InvalidAdmission);
-    }
+    meta::Admitting::admitted(value).map_err(|_| BootstrapError::InvalidAdmission)?;
     Ok(())
 }
 

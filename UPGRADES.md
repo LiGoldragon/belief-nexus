@@ -4,7 +4,7 @@
 
 Source only. This revision is not deployed and moves no live state by itself.
 
-**Selected cohort.** signal-belief-nexus 0.3.3 (`1a8b`), meta-signal-belief-nexus 0.4.0 (`f4de`),
+**Selected cohort.** signal-belief-nexus 0.3.3 (`1a8b`), meta-signal-belief-nexus 0.4.1 (`341e`),
 translator 0.3.2 (`5719`), Signal 10.3.0 (`7afb`), datom-codec 0.33.0 (`eabe`), protos 0.33.0
 (`3c7a`) and ethos-zero 19.2.0 (`5a5d`). The stored memory file name and the memory image
 encoding are unchanged: `MemoryImage`, its encoding and `FileMemory` load and store are not edited,
@@ -36,6 +36,8 @@ runtime and state roots. A start now prepares the Place before it opens anything
 - Failed start after a successful move: the destination is intact. Start again; a repeat moves
   nothing and completes.
 - A failed selection or preparation reports its cause; the launcher exits and stops its children.
+  Every failure after the children start, including a meta call that fails because the Nexus died,
+  stops and reaps both children before the launcher exits.
 - The exclusion serializes cooperating starts of a standard place only. An explicit place is not
   serialized, and an alias the process cannot observe is outside it.
 - The bootstrap owner and the paired translator are checked against the effective user; that is

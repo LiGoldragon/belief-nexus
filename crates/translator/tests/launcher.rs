@@ -143,6 +143,14 @@ fn every_invalid_input_is_refused_before_the_place_is_prepared_or_a_child_starte
     let mut sema_file = good.clone();
     sema_file.memory_file_name = MemoryFileName("memory.sema".into());
     cases.push((place_text.clone(), shared_translator::encode(&sema_file)));
+    for name in ["x/", "x/.", ".", "..", "", "/abs", "a/b", "./x"] {
+        let mut fourth = good.clone();
+        fourth.meta_translator_socket_name = SocketName(name.into());
+        cases.push((place_text.clone(), shared_translator::encode(&fourth)));
+        let mut third = good.clone();
+        third.ordinary_translator_socket_name = SocketName(name.into());
+        cases.push((place_text.clone(), shared_translator::encode(&third)));
+    }
     let mut other_owner = good.clone();
     other_owner.owner = public::Owner::Login(UserId(user() + 1));
     cases.push((place_text.clone(), shared_translator::encode(&other_owner)));
