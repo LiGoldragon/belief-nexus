@@ -7,8 +7,8 @@ Source only. This revision is not deployed and moves no live state by itself.
 **Selected cohort.** signal-belief-nexus 0.3.3 (`1a8b`), meta-signal-belief-nexus 0.4.0 (`f4de`),
 translator 0.3.2 (`5719`), Signal 10.3.0 (`7afb`), datom-codec 0.33.0 (`eabe`), protos 0.33.0
 (`3c7a`) and ethos-zero 19.2.0 (`5a5d`). The stored memory file name and the memory image
-encoding are unchanged: no file under `crates/daemon/src` or `crates/core/src` that defines them
-is edited.
+encoding are unchanged: `MemoryImage`, its encoding and `FileMemory` load and store are not edited,
+and the memory file selection code moves unchanged from the launcher into the daemon crate.
 
 **Startup change.** translator 0.2.0 moved a Place from `metaflow/NAME` to `nexus/NAME` under the
 runtime and state roots. A start now prepares the Place before it opens anything:
