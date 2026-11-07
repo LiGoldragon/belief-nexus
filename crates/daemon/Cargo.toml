@@ -1,6 +1,6 @@
 [package]
 name = "belief-nexus-daemon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -10,12 +10,12 @@ path = "src/lib.rs"
 [dependencies]
 belief-nexus-core = { path = "../core" }
 emission-belief-nexus = { path = "../emission" }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "8d75cf1e50f48ec312b3322c3f86f29446d9f8c7" }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "f4decd7" }
 nix = { version = "0.30", features = ["socket", "user"] }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
-signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "41e6549abf5649c6a035d02d89cd3b630c3c03e8" }
-translator = { git = "https://github.com/LiGoldragon/translator", rev = "3a434151152fcc5c0e0c36994c52c7cb96457a65", features = ["unix"] }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "7afb68b", default-features = false }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "1a8bef4" }
+translator = { git = "https://github.com/LiGoldragon/translator", rev = "571979d", features = ["unix"] }
 
 [dev-dependencies]
 tempfile = "3"

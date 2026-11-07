@@ -1,6 +1,6 @@
 [package]
 name = "belief-nexus-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 emission-belief-nexus = { path = "../emission" }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "8d75cf1e50f48ec312b3322c3f86f29446d9f8c7" }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "f4decd7" }
 sha2 = "0.10"
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "41e6549abf5649c6a035d02d89cd3b630c3c03e8" }
-translator = { git = "https://github.com/LiGoldragon/translator", rev = "3a434151152fcc5c0e0c36994c52c7cb96457a65" }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "1a8bef4" }
+translator = { git = "https://github.com/LiGoldragon/translator", rev = "571979d" }

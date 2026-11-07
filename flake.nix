@@ -20,7 +20,7 @@
         };
         cargoArtifacts = rust.craneLib.buildDepsOnly { src = source; cargoExtraArgs = "--workspace --all-features"; };
         buildBinary = package: name: rust.craneLib.buildPackage {
-          pname = name; version = "0.1.0"; src = source; inherit cargoArtifacts;
+          pname = name; version = "0.2.0"; src = source; inherit cargoArtifacts;
           cargoExtraArgs = "-p ${package} --bin ${name} --all-features";
           doCheck = false;
         };
@@ -29,7 +29,7 @@
           nexus = buildBinary "belief-nexus-daemon" "belief-nexus-daemon";
           translator = buildBinary "belief-nexus-translator" "belief-translator";
           internal = rust.craneLib.buildPackage {
-            pname = "belief-nexus-internal"; version = "0.1.0"; src = source; inherit cargoArtifacts;
+            pname = "belief-nexus-internal"; version = "0.2.0"; src = source; inherit cargoArtifacts;
             cargoExtraArgs = "-p belief-nexus-translator --bin belief-nexus --bin belief-nexus-meta --bin belief-pair --all-features";
             doCheck = false;
             postInstall = ''
@@ -57,7 +57,7 @@
         };
         checks = {
           test = rust.craneLib.cargoTest {
-            pname = "belief-nexus-test"; version = "0.1.0"; src = source; inherit cargoArtifacts;
+            pname = "belief-nexus-test"; version = "0.2.0"; src = source; inherit cargoArtifacts;
             cargoTestExtraArgs = "--workspace --all-features";
             nativeBuildInputs = [ pkgs.git ];
           };

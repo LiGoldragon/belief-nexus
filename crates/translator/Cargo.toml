@@ -1,6 +1,6 @@
 [package]
 name = "belief-nexus-translator"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
@@ -9,13 +9,13 @@ license = "MIT"
 path = "src/lib.rs"
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d90ff185d54bc0007b19a8d9bc390c6bfeb12" }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3" }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4" }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade3" }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
-signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }
-shared-translator = { package = "translator", git = "https://github.com/LiGoldragon/translator", rev = "3a434151152fcc5c0e0c36994c52c7cb96457a65", features = ["text", "unix"] }
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "41e6549abf5649c6a035d02d89cd3b630c3c03e8", features = ["datom"] }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "8d75cf1e50f48ec312b3322c3f86f29446d9f8c7", features = ["datom"] }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "7afb68b", default-features = false }
+shared-translator = { package = "translator", git = "https://github.com/LiGoldragon/translator", rev = "571979d", features = ["text", "unix"] }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "1a8bef4", features = ["datom"] }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "f4decd7", features = ["datom"] }
 emission-belief-nexus = { path = "../emission", features = ["datom"] }
 nix = { version = "0.30", features = ["socket", "user", "signal", "process"] }
 

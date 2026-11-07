@@ -59,7 +59,7 @@ impl TextLimits {
     fn budget(self) -> Budget {
         Budget {
             remaining: i64::try_from(self.nodes).expect("validated node count fits i64"),
-            reader: ReaderBudget { remaining: self.nodes },
+            reader: ReaderBudget::try_from(self.nodes).expect("validated node count fits the reader budget"),
             depth: 0,
             maximum_depth: i64::try_from(self.depth).expect("validated depth fits i64"),
         }

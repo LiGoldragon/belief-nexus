@@ -97,10 +97,6 @@ pub fn run(bootstrap: meta::NexusBootstrap) -> io::Result<()> {
 }
 
 pub fn run_until(bootstrap: meta::NexusBootstrap, stop: Arc<AtomicBool>) -> io::Result<()> {
-    let ordinary = bind_new(Path::new(&(bootstrap.ordinary_socket.0).0))?;
-    let privileged = bind_new(Path::new(&(bootstrap.meta_socket.0).0))?;
-    ordinary.set_nonblocking(true)?;
-    privileged.set_nonblocking(true)?;
     let daemon = Daemon::start_file(
         DaemonBootstrap {
             nexus: bootstrap.clone(),
@@ -108,6 +104,10 @@ pub fn run_until(bootstrap: meta::NexusBootstrap, stop: Arc<AtomicBool>) -> io::
         SocketEmission::new(&bootstrap),
     )
     .map_err(|error| io::Error::other(format!("bootstrap: {error:?}")))?;
+    let ordinary = bind_new(Path::new(&(bootstrap.ordinary_socket.0).0))?;
+    let privileged = bind_new(Path::new(&(bootstrap.meta_socket.0).0))?;
+    ordinary.set_nonblocking(true)?;
+    privileged.set_nonblocking(true)?;
     let daemon = Arc::new(Mutex::new(daemon));
     let meta_daemon = Arc::clone(&daemon);
     let meta_stop = Arc::clone(&stop);
@@ -397,13 +397,12 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
             )),
-            memory_path: meta::MemoryPath(
-                directory
-                    .path()
-                    .join("memory")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
+            place: translator::Place {
+                place_name: translator::PlaceName("server".into()),
+                runtime: translator::Runtime(directory.path().to_string_lossy().into_owned()),
+                state: translator::State(directory.path().to_string_lossy().into_owned()),
+            },
+            memory_file_name: meta::MemoryFileName("memory".into()),
             admission: meta::Admission {
                 byte_limit: meta::ByteLimit(1_000_000),
                 timeout: meta::Timeout(1_000),

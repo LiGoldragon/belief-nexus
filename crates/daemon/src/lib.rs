@@ -17,6 +17,7 @@ use std::{
     path::PathBuf,
 };
 
+pub mod memory_files;
 pub mod server;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -345,7 +346,12 @@ mod tests {
                 emission_translator_socket: meta::EmissionTranslatorSocket(meta::SocketPath(
                     "/run/translator".into(),
                 )),
-                memory_path: meta::MemoryPath("/unused".into()),
+                place: translator::Place {
+                    place_name: translator::PlaceName("unit".into()),
+                    runtime: translator::Runtime("/run".into()),
+                    state: translator::State("/unused".into()),
+                },
+                memory_file_name: meta::MemoryFileName("memory".into()),
                 admission: meta::Admission {
                     byte_limit: meta::ByteLimit(1_000_000),
                     timeout: meta::Timeout(5_000),
@@ -2379,6 +2385,41 @@ pub enum BootstrapError {
     InvalidAdmission,
     Memory(MemoryError),
     CorruptState,
+    Refused(meta::BootstrapRefusal),
+    Preparation(String),
+    MemoryFile(String),
+}
+
+/// The one memory path of a bootstrap, after it is validated, its Place prepared and its memory
+/// file selected under the same exclusion. Nothing is bound or opened before this succeeds.
+pub trait PreparesMemory {
+    fn prepared_memory(&self, effective_user: i64) -> Result<PathBuf, BootstrapError>;
+}
+
+impl PreparesMemory for meta::NexusBootstrap {
+    fn prepared_memory(&self, effective_user: i64) -> Result<PathBuf, BootstrapError> {
+        use meta::{Locating, Validating};
+        use memory_files::{MemoryFileSelecting, MemoryFilesFromCurrent};
+        use translator::placement::{Held, ScopedPreparation};
+        self.validated(effective_user).map_err(BootstrapError::Refused)?;
+        validate_bootstrap(self)?;
+        let expected = self.memory_path();
+        self.place
+            .with_prepared_place(|prepared| {
+                let current = prepared.state().join(&self.memory_file_name.0);
+                debug_assert_eq!(current, expected);
+                memory_files::MemoryFiles::from_current(current).select()
+            })
+            .map_err(|held| match held {
+                Held::Preparation(error) => BootstrapError::Preparation(error.to_string()),
+                Held::Operation(error) => BootstrapError::MemoryFile(error.to_string()),
+            })
+    }
+}
+
+/// The effective user the daemon runs as, which a bootstrap owner must be.
+pub fn effective_user() -> i64 {
+    i64::from(nix::unistd::Uid::effective().as_raw())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2404,7 +2445,7 @@ impl FileMemory {
 
 impl<E: EmissionPort> Daemon<E, FileMemory> {
     pub fn start_file(bootstrap: DaemonBootstrap, effects: E) -> Result<Self, BootstrapError> {
-        let store = FileMemory::new(PathBuf::from(&bootstrap.nexus.memory_path.0));
+        let store = FileMemory::new(bootstrap.nexus.prepared_memory(effective_user())?);
         Self::start(bootstrap, effects, store)
     }
 }

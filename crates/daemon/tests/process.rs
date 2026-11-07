@@ -119,13 +119,12 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
         )),
         meta_socket: meta::MetaSocket(meta::SocketPath(privileged.to_string_lossy().into_owned())),
         emission_translator_socket: meta::EmissionTranslatorSocket(meta::SocketPath(emission_socket.to_string_lossy().into_owned())),
-        memory_path: meta::MemoryPath(
-            directory
-                .path()
-                .join("memory")
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        place: translator::Place {
+            place_name: translator::PlaceName("process".into()),
+            runtime: translator::Runtime(directory.path().to_string_lossy().into_owned()),
+            state: translator::State(directory.path().to_string_lossy().into_owned()),
+        },
+        memory_file_name: meta::MemoryFileName("memory".into()),
         admission: meta::Admission {
             byte_limit: meta::ByteLimit(1_000_000),
             timeout: meta::Timeout(1_000),
@@ -142,6 +141,15 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
         .spawn()
         .unwrap();
     let signal = bootstrap.signalize().unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_frame(
+            &FrameBody::from(<meta::NexusBootstrap as meta::Enveloped>::envelope()),
+            signal::FrameCapacity::default(),
+        )
+        .unwrap();
     child
         .stdin
         .as_mut()

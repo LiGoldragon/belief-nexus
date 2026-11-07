@@ -9,88 +9,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-#[derive(Debug)]
-struct MemoryFiles {
-    current: PathBuf,
-    legacy: PathBuf,
-}
-
-trait MemoryFilesFromCurrent {
-    fn from_current(current: PathBuf) -> Self;
-}
-
-trait MemoryFileSelecting {
-    fn select(self) -> Result<PathBuf, MemoryFileSelectionError>;
-}
-
-#[derive(Debug)]
-enum MemoryFileSelectionError {
-    Inspection { path: PathBuf, source: std::io::Error },
-    Conflict { current: PathBuf, legacy: PathBuf },
-    Migration { current: PathBuf, legacy: PathBuf, source: std::io::Error },
-}
-
-impl MemoryFilesFromCurrent for MemoryFiles {
-    fn from_current(current: PathBuf) -> Self {
-        let legacy = current.with_extension("sema");
-        Self { current, legacy }
-    }
-}
-
-impl MemoryFileSelecting for MemoryFiles {
-    fn select(self) -> Result<PathBuf, MemoryFileSelectionError> {
-        let current_exists = self.current.try_exists().map_err(|source| MemoryFileSelectionError::Inspection {
-            path: self.current.clone(),
-            source,
-        })?;
-        let legacy_exists = self.legacy.try_exists().map_err(|source| MemoryFileSelectionError::Inspection {
-            path: self.legacy.clone(),
-            source,
-        })?;
-        match (current_exists, legacy_exists) {
-            (true, true) => Err(MemoryFileSelectionError::Conflict { current: self.current, legacy: self.legacy }),
-            (false, true) => {
-                std::fs::rename(&self.legacy, &self.current).map_err(|source| MemoryFileSelectionError::Migration {
-                    current: self.current.clone(),
-                    legacy: self.legacy.clone(),
-                    source,
-                })?;
-                Ok(self.current)
-            }
-            (true, false) | (false, false) => Ok(self.current),
-        }
-    }
-}
-
-impl std::fmt::Display for MemoryFileSelectionError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Inspection { path, source } => write!(formatter, "could not inspect Memory path {}: {source}", path.display()),
-            Self::Conflict { current, legacy } => write!(
-                formatter,
-                "Memory path conflict: current {} and legacy {} both exist",
-                current.display(),
-                legacy.display()
-            ),
-            Self::Migration { current, legacy, source } => write!(
-                formatter,
-                "could not migrate legacy Memory {} to current {}: {source}",
-                legacy.display(),
-                current.display()
-            ),
-        }
-    }
-}
-
-impl std::error::Error for MemoryFileSelectionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Inspection { source, .. } | Self::Migration { source, .. } => Some(source),
-            Self::Conflict { .. } => None,
-        }
-    }
-}
-
 fn component(value: &str) -> Result<&str, Box<dyn std::error::Error>> {
     let mut parts = Path::new(value).components();
     if matches!(parts.next(), Some(Component::Normal(_))) && parts.next().is_none() { Ok(value) } else { Err(format!("deployment name is not one path component: {value}").into()) }
@@ -106,35 +24,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let place = place_from_text(&arguments.next().ok_or("PLACE")?)?;
     let deployment: Deployment = deployment_from_text(&arguments.next().ok_or("DEPLOYMENT")?)?;
     if arguments.next().is_some() { return Err("unexpected launcher argument".into()); }
-    shared_translator::placement::validate_metaflow_name(&place.metaflow_name.0)?;
+    shared_translator::placement::validate_place_name(&place.place_name.0)?;
+    if deployment.admission.byte_limit.0 <= 0 || deployment.admission.timeout.0 <= 0 { return Err("admission limits must be positive".into()); }
+    let effective = Uid::effective();
+    let uid = UserId(i64::from(effective.as_raw()));
+    let gid = shared_translator::GroupId(i64::from(nix::unistd::Gid::effective().as_raw()));
     let runtime = shared_translator::placement::runtime_path(&place);
     let state = shared_translator::placement::state_path(&place);
-    if !runtime.is_dir() { return Err(format!("metaflow runtime does not exist: {}", runtime.display()).into()); }
-    if !state.is_dir() { return Err(format!("metaflow state does not exist: {}", state.display()).into()); }
     let ordinary = socket(&runtime, &deployment.ordinary_socket_name)?;
     let privileged = socket(&runtime, &deployment.meta_socket_name)?;
     let translator_socket = socket(&runtime, &deployment.ordinary_translator_socket_name)?;
     let meta_translator = socket(&runtime, &deployment.meta_translator_socket_name)?;
-    let memory = MemoryFiles::from_current(state.join(component(&deployment.memory_file_name.0)?)).select()?;
+    component(&deployment.memory_file_name.0)?;
+    let configured = meta::NexusBootstrap {
+        ordinary_socket: meta::OrdinarySocket(meta::SocketPath(ordinary.to_string_lossy().into_owned())),
+        meta_socket: meta::MetaSocket(meta::SocketPath(privileged.to_string_lossy().into_owned())),
+        emission_translator_socket: meta::EmissionTranslatorSocket(meta::SocketPath(translator_socket.to_string_lossy().into_owned())),
+        place: place.clone(),
+        memory_file_name: meta::MemoryFileName(deployment.memory_file_name.0.clone()),
+        admission: deployment.admission.clone(),
+        paired_translator: meta::PairedTranslator { user_id: uid.clone(), group_id: gid.clone(), process_id: ProcessId(0) },
+        bootstrap_owner: meta::BootstrapOwner(deployment.owner.clone()),
+    };
+    meta::Validating::validated(&configured, uid.0).map_err(|refusal| format!("bootstrap refused before any effect: {refusal:?}"))?;
+    shared_translator::placement::Preparable::prepare_for_start(&place)?;
+    if !runtime.is_dir() { return Err(format!("metaflow runtime does not exist: {}", runtime.display()).into()); }
+    if !state.is_dir() { return Err(format!("metaflow state does not exist: {}", state.display()).into()); }
 
     let mut nexus = Command::new(&deployment.nexus_executable.0).stdin(Stdio::piped()).spawn()?;
     let mut translator = match Command::new(&deployment.translator_executable.0).stdin(Stdio::piped()).spawn() {
         Ok(child) => child, Err(error) => { stop(&mut nexus); return Err(error.into()); }
     };
-    let uid = UserId(i64::from(Uid::current().as_raw()));
-    let gid = shared_translator::GroupId(i64::from(nix::unistd::Gid::current().as_raw()));
-    if deployment.owner != signal_belief_nexus::Owner::Login(uid.clone()) { return Err("deployment owner is not the launching login".into()); }
     let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
     let bootstrapped = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut input = nexus.stdin.take().ok_or("Nexus bootstrap pipe")?;
         let bootstrap = meta::NexusBootstrap {
-            ordinary_socket: meta::OrdinarySocket(meta::SocketPath(ordinary.to_string_lossy().into_owned())),
-            meta_socket: meta::MetaSocket(meta::SocketPath(privileged.to_string_lossy().into_owned())),
-            emission_translator_socket: meta::EmissionTranslatorSocket(meta::SocketPath(translator_socket.to_string_lossy().into_owned())),
-            memory_path: meta::MemoryPath(memory.to_string_lossy().into_owned()), admission: deployment.admission.clone(),
             paired_translator: meta::PairedTranslator { user_id: uid.clone(), group_id: gid.clone(), process_id: ProcessId(i64::from(translator.id())) },
-            bootstrap_owner: meta::BootstrapOwner(deployment.owner.clone()),
+            ..configured.clone()
         };
+        input.write_frame(&FrameBody::from(<meta::NexusBootstrap as meta::Enveloped>::envelope()), capacity)?;
         let archived = bootstrap.signalize()?;
         input.write_frame(&FrameBody::from(archived.bytes().to_vec()), capacity)?; input.flush()?; drop(input);
 
@@ -181,70 +109,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let survivor = if ended.pid() == Some(nexus_pid) { translator_pid } else { nexus_pid };
     let _ = kill(survivor, Signal::SIGTERM); let _ = waitpid(survivor, None);
     Err(format!("paired Belief process ended: {ended:?}").into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{MemoryFileSelecting, MemoryFileSelectionError, MemoryFiles, MemoryFilesFromCurrent};
-
-    trait MemoryFixture {
-        fn memory_files(&self) -> MemoryFiles;
-    }
-
-    impl MemoryFixture for tempfile::TempDir {
-        fn memory_files(&self) -> MemoryFiles {
-            MemoryFiles::from_current(self.path().join("belief.memory"))
-        }
-    }
-
-    #[test]
-    fn legacy_only_memory_is_migrated_to_the_current_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let files = directory.memory_files();
-        std::fs::write(&files.legacy, b"memory").unwrap();
-        let selected = files.select().unwrap();
-        assert_eq!(selected, directory.path().join("belief.memory"));
-        assert_eq!(std::fs::read(selected).unwrap(), b"memory");
-        assert!(!directory.path().join("belief.sema").exists());
-    }
-
-    #[test]
-    fn current_only_memory_is_used_without_change() {
-        let directory = tempfile::tempdir().unwrap();
-        let files = directory.memory_files();
-        std::fs::write(&files.current, b"current").unwrap();
-        let selected = files.select().unwrap();
-        assert_eq!(std::fs::read(selected).unwrap(), b"current");
-    }
-
-    #[test]
-    fn current_and_legacy_memory_are_a_typed_conflict_naming_both_paths() {
-        let directory = tempfile::tempdir().unwrap();
-        let files = directory.memory_files();
-        std::fs::write(&files.current, b"current").unwrap();
-        std::fs::write(&files.legacy, b"legacy").unwrap();
-        let current = files.current.clone();
-        let legacy = files.legacy.clone();
-        let error = files.select().unwrap_err();
-        match &error {
-            MemoryFileSelectionError::Conflict { current: found_current, legacy: found_legacy } => {
-                assert_eq!(found_current, &current);
-                assert_eq!(found_legacy, &legacy);
-            }
-            other => panic!("expected typed Memory path conflict, got {other:?}"),
-        }
-        let message = error.to_string();
-        assert!(message.contains(current.to_str().unwrap()));
-        assert!(message.contains(legacy.to_str().unwrap()));
-        assert_eq!(std::fs::read(current).unwrap(), b"current");
-        assert_eq!(std::fs::read(legacy).unwrap(), b"legacy");
-    }
-
-    #[test]
-    fn fresh_memory_selects_the_current_path_without_creating_it() {
-        let directory = tempfile::tempdir().unwrap();
-        let selected = directory.memory_files().select().unwrap();
-        assert_eq!(selected, directory.path().join("belief.memory"));
-        assert!(!selected.exists());
-    }
 }
