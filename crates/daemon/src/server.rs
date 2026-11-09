@@ -440,7 +440,7 @@ mod tests {
             meta::Set::SubscriberCapacity(2),
             meta::Set::OrdinaryPeers(wire::PeerList(vec![identity.clone()])),
             meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
-            meta::Set::Layout(meta::HarnessLayout { harness: wire::Harness::Codex, layout }),
+            meta::Set::LayoutOfHarness(meta::HarnessLayout { harness: wire::Harness::Codex, layout }),
             meta::Set::GenerationRetention(meta::RetentionPolicy::KeepAll),
             meta::Set::NexusFrameCapacity(meta::ByteLimit(1_000_000)),
             meta::Set::NexusTransportTimeout(meta::Timeout(1_000)),

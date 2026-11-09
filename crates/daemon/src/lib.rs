@@ -92,8 +92,8 @@ fn setting_name(set: &meta::Set) -> meta::SettingName {
         meta::Set::SubscriberCapacity(_) => meta::SettingName::SubscriberCapacity,
         meta::Set::OrdinaryPeers(_) => meta::SettingName::OrdinaryPeers,
         meta::Set::MetaPeers(_) => meta::SettingName::MetaPeers,
-        meta::Set::Layout(value) => meta::SettingName::Layout(value.harness.clone()),
-        meta::Set::Placement(value) => meta::SettingName::Placement(value.kind.clone()),
+        meta::Set::LayoutOfHarness(value) => meta::SettingName::LayoutOfHarness(value.harness.clone()),
+        meta::Set::PlacementOfKind(value) => meta::SettingName::PlacementOfKind(value.kind.clone()),
         meta::Set::GenerationRetention(_) => meta::SettingName::GenerationRetention,
         meta::Set::NexusFrameCapacity(_) => meta::SettingName::NexusFrameCapacity,
         meta::Set::NexusTransportTimeout(_) => meta::SettingName::NexusTransportTimeout,
@@ -747,7 +747,7 @@ mod tests {
 
         for (reply, matches_request) in [(wrong_repository, false), (wrong_variant, false), (matching, true)] {
             let initial = ready_memory();
-            let expected_resolution = wire::Resolution { found_vector: Vec::new(), module_name_vector: vec![module()] };
+            let expected_resolution = wire::Resolution { found: wire::Found(Vec::new()), missing: wire::Missing(vec![module()]) };
             let mut daemon = Daemon::start(
                 bootstrap(),
                 FakeEffects { replies: [reply].into(), ..Default::default() },
@@ -947,7 +947,7 @@ mod tests {
         assert_eq!(daemon.store.image, Some(before));
         assert_eq!(daemon.store.stores, stores + 1);
         assert_eq!(daemon.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(), publishes);
-        assert_eq!(daemon.core.resolve(&[module()]).unwrap().found_vector, vec![wire::Found(module())]);
+        assert_eq!(daemon.core.resolve(&[module()]).unwrap().found.0, vec![module()]);
     }
 
     #[test]
@@ -2850,11 +2850,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             meta::Set::MetaPeers(value) => {
                 self.memory.configuration.meta_peers = Some(value.clone())
             }
-            meta::Set::Layout(value) => {
+            meta::Set::LayoutOfHarness(value) => {
                 self.memory.configuration.layouts.retain(|current| current.harness != value.harness);
                 self.memory.configuration.layouts.push(value.clone());
             }
-            meta::Set::Placement(value) => {
+            meta::Set::PlacementOfKind(value) => {
                 self.memory.configuration.placements.retain(|current| current.kind != value.kind);
                 self.memory.configuration.placements.push(value.clone());
             }

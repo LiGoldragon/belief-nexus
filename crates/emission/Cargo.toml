@@ -13,12 +13,12 @@ default = []
 datom = ["dep:datom-codec", "dep:protos", "signal-belief-nexus/datom", "meta-signal-belief-nexus/datom"]
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade3", optional = true }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526", optional = true }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598", optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
-signal = { git = "https://github.com/LiGoldragon/signal", rev = "7afb68b", default-features = false }
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "1a8bef4", default-features = false }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "341ea8b", default-features = false }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "d77169d", default-features = false }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "c388b11", default-features = false }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "baf8ce0", default-features = false }
 toml_edit = "0.22"
 
 [dev-dependencies]

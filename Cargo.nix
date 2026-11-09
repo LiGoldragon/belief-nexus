@@ -517,13 +517,13 @@ rec {
       };
       "datom-codec" = rec {
         crateName = "datom-codec";
-        version = "0.33.0";
+        version = "0.33.1";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/datom-codec";
-          rev = "eabead48b31e8d4f429d7fb156dd18548bbd79c1";
-          sha256 = "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg";
+          rev = "09a0526949b043f921b6d3ce115b7f455291f2e2";
+          sha256 = "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d";
         };
         libName = "datom_codec";
         dependencies = [
@@ -556,8 +556,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/datom-codec";
-          rev = "eabead48b31e8d4f429d7fb156dd18548bbd79c1";
-          sha256 = "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg";
+          rev = "09a0526949b043f921b6d3ce115b7f455291f2e2";
+          sha256 = "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d";
         };
         procMacro = true;
         libName = "datom_codec_derive";
@@ -716,14 +716,14 @@ rec {
       };
       "ethos-zero" = rec {
         crateName = "ethos-zero";
-        version = "19.2.0";
+        version = "22.0.0";
         edition = "2024";
         crateBin = [];
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/ethos-zero";
-          rev = "5a5daca315ab24460ccbcd5038130c453e853e6e";
-          sha256 = "0n9wvmghq0zaqa86xib2bc6q4nis6f0rmcbgb6xdas5dhlm3nnak";
+          rev = "1976e45fe1edfd5676cb33919dba1ec20c785a02";
+          sha256 = "12b6np5n8knlpv2rb98g0m04n6xxaprd8n5hy4wgw658h5vg216j";
         };
         libName = "ethos_zero";
         dependencies = [
@@ -1112,13 +1112,13 @@ rec {
       };
       "meta-signal-belief-nexus" = rec {
         crateName = "meta-signal-belief-nexus";
-        version = "0.4.1";
+        version = "0.5.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-belief-nexus";
-          rev = "341ea8b1669b525e860301aa04dcd5c872615d2e";
-          sha256 = "0h52pz74g8xj5i9gl2z14hni3nxrlgf2qiq4hgwp6xcfm03d4f3h";
+          rev = "baf8ce006bf30f12e9f6411dffc56577c8769537";
+          sha256 = "1mqw28wpsc0mc921fqzskclgdrxqkanh02hpkji1nr64ch17v85b";
         };
         libName = "meta_signal_belief_nexus";
         dependencies = [
@@ -1155,7 +1155,7 @@ rec {
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "signal-belief-nexus/datom" "translator/datom" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" "signal-belief-nexus/datom" "translator/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
@@ -1352,8 +1352,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/protos";
-          rev = "3c7ade34010cec6cec153ae694ee335f7fea0193";
-          sha256 = "1crw7gc7b870xxk9pavzfpyav44163izylndfr8affbsm6hd863s";
+          rev = "c93b598025984f8a73e70aa18b8e8a6fdfdfdfd8";
+          sha256 = "00rwpzkxqmwhmxr2dkv9ay9wfvjxbprvvv23lfxmqamm2264r2gb";
         };
         dependencies = [
           {
@@ -1791,16 +1791,26 @@ rec {
       };
       "signal" = rec {
         crateName = "signal";
-        version = "10.3.0";
+        version = "10.4.1";
         edition = "2024";
         links = "signal";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal";
-          rev = "7afb68bcd19ce774f47d11c5e69f6e10054f78de";
-          sha256 = "0yyv9bylafhnpas51gz8ppmvv0r77rmfjc0yslkjk7f82rijvrm3";
+          rev = "d77169d061d0d0d7913415257d0f1c1603260583";
+          sha256 = "1rmh26a9qp0j80r5d733kw9s6gfdj6sd8y14vhphqfpvssa079ah";
         };
         dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
           {
             name = "rkyv";
             packageId = "rkyv";
@@ -1822,16 +1832,17 @@ rec {
           "datom" = [ "dep:datom-codec" "dep:protos" ];
           "transport" = [ "dep:tokio" ];
         };
+        resolvedDefaultFeatures = [ "datom" ];
       };
       "signal-belief-nexus" = rec {
         crateName = "signal-belief-nexus";
-        version = "0.3.3";
+        version = "0.4.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-belief-nexus";
-          rev = "1a8bef46b0ec5652c13c1ec3f79b109f4cb6febe";
-          sha256 = "16k3nsz6bdjsxmlzx5r8wpg925j4w7375sswmc8fzi4i6gnblghd";
+          rev = "c388b112d14b6460d321158e63ae2894d6eaf72e";
+          sha256 = "1r0q7zyggk1j1h480v2ncpxbyfgwr8g1xswdqmv158y347i1f609";
         };
         libName = "signal_belief_nexus";
         dependencies = [
@@ -1863,7 +1874,7 @@ rec {
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "translator/datom" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" "translator/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
@@ -2152,13 +2163,13 @@ rec {
       };
       "translator" = rec {
         crateName = "translator";
-        version = "0.3.2";
+        version = "0.4.2";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/translator";
-          rev = "571979d667d8b16171847c3122b7577a2eaa6669";
-          sha256 = "0zxk26fb05czaxd3sqgcln61c5xvmzhvjmawvph8gmhscclh34za";
+          rev = "27da70fda647d78655d755477913a47267eb9c62";
+          sha256 = "0xs4ni7zskajcfbmszdxqqkwjymnsvvdydx2higrdgwlyq6pk3sc";
         };
         dependencies = [
           {
@@ -2201,7 +2212,7 @@ rec {
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" ];
           "text" = [ "datom" ];
           "unix" = [ "dep:libc" "dep:nix" ];
         };

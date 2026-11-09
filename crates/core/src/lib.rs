@@ -104,7 +104,7 @@ pub struct FurnishPlan {
     pub workspace: wire::Workspace,
     pub harness: wire::Harness,
     pub requested: Vec<wire::ModuleName>,
-    pub found: Vec<wire::Found>,
+    pub found: Vec<wire::ModuleName>,
     pub missing: Vec<wire::ModuleName>,
     pub image: WorkspaceImage,
     pub generation_id: wire::GenerationId,
@@ -145,7 +145,7 @@ struct WorkspaceRecord {
     harness: wire::Harness,
     requested: Vec<wire::ModuleName>,
     successful: Option<SuccessfulPublication>,
-    last_found: Vec<wire::Found>,
+    last_found: Vec<wire::ModuleName>,
     last_missing: Vec<wire::ModuleName>,
     pending: Option<PendingPublication>,
 }
@@ -223,18 +223,19 @@ impl BeliefCore {
     ) -> Result<wire::Resolution, ResolveError> {
         let resolved = self.resolve_sources(requested)?;
         Ok(wire::Resolution {
-            found_vector: resolved
-                .iter()
-                .filter_map(|item| {
-                    item.as_ref()
-                        .map(|(_, module)| wire::Found(module.source.name.clone()))
-                })
-                .collect(),
-            module_name_vector: requested
-                .iter()
-                .zip(resolved)
-                .filter_map(|(name, item)| item.is_none().then_some(name.clone()))
-                .collect(),
+            found: wire::Found(
+                resolved
+                    .iter()
+                    .filter_map(|item| item.as_ref().map(|(_, module)| module.source.name.clone()))
+                    .collect(),
+            ),
+            missing: wire::Missing(
+                requested
+                    .iter()
+                    .zip(resolved)
+                    .filter_map(|(name, item)| item.is_none().then_some(name.clone()))
+                    .collect(),
+            ),
         })
     }
 
@@ -267,7 +268,7 @@ impl BeliefCore {
             .iter()
             .filter_map(|item| {
                 item.as_ref()
-                    .map(|(_, module)| wire::Found(module.source.name.clone()))
+                    .map(|(_, module)| module.source.name.clone())
             })
             .collect();
         let missing: Vec<_> = requested
@@ -330,9 +331,7 @@ impl BeliefCore {
                     })
                     .collect(),
             ),
-            found_modules: emission::FoundModules(
-                plan.found.iter().map(|found| found.0.clone()).collect(),
-            ),
+            found_modules: emission::FoundModules(plan.found.clone()),
             missing_modules: emission::MissingModules(plan.missing.clone()),
             retention_policy: context.retention_policy,
         };
@@ -445,8 +444,8 @@ impl BeliefCore {
                     source_revisions,
                     furnished_paths: furnished.furnished_paths,
                 }),
-                last_found: furnished.found_vector,
-                last_missing: furnished.module_name_vector,
+                last_found: furnished.found.0,
+                last_missing: furnished.missing.0,
                 pending: None,
             },
         );
@@ -479,8 +478,8 @@ impl BeliefCore {
         successful.source_revisions != current
             || record.last_found.len() + record.last_missing.len() != record.requested.len()
             || self.resolve(&record.requested).is_ok_and(|resolution| {
-                resolution.found_vector != record.last_found
-                    || resolution.module_name_vector != record.last_missing
+                resolution.found.0 != record.last_found
+                    || resolution.missing.0 != record.last_missing
             })
     }
 
@@ -518,13 +517,7 @@ impl BeliefCore {
             return Err(CompletionError::PublicationIdentityMismatch);
         }
         let publication = pending.intent.publication;
-        let found_vector: Vec<_> = publication
-            .found_modules
-            .0
-            .iter()
-            .cloned()
-            .map(wire::Found)
-            .collect();
+        let found = publication.found_modules.0.clone();
         let missing = publication.missing_modules.0.clone();
         record.successful = Some(SuccessfulPublication {
             generation_id: publication.generation_id.clone(),
@@ -537,15 +530,15 @@ impl BeliefCore {
                 .collect(),
             furnished_paths: furnished_paths(&publication.workspace, &publication.workspace_image.layout),
         });
-        record.last_found = found_vector.clone();
+        record.last_found = found.clone();
         record.last_missing = missing.clone();
         Ok(wire::FurnishedWorkspace {
             workspace: workspace.clone(),
             generation_id: publication.generation_id,
             publication_revision: publication.intended_publication.0,
             furnished_paths: furnished_paths(&publication.workspace, &publication.workspace_image.layout),
-            found_vector,
-            module_name_vector: missing,
+            found: wire::Found(found),
+            missing: wire::Missing(missing),
         })
     }
 
@@ -1072,7 +1065,7 @@ mod tests {
                 core.requested(&workspace("/w")).unwrap().to_vec(),
             ))
             .unwrap();
-        assert_eq!(restored.found, vec![wire::Found(vision)]);
+        assert_eq!(restored.found, vec![vision]);
         assert_eq!(restored.image.skills[0].bytes, b"three");
     }
 
