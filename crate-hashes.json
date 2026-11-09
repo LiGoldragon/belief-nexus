@@ -1,0 +1,10 @@
+{
+  "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#0.33.0": "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg",
+  "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#datom-codec-derive@0.32.3": "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg",
+  "git+https://github.com/LiGoldragon/ethos-zero?rev=5a5daca#19.2.0": "0n9wvmghq0zaqa86xib2bc6q4nis6f0rmcbgb6xdas5dhlm3nnak",
+  "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=341ea8b#0.4.1": "0h52pz74g8xj5i9gl2z14hni3nxrlgf2qiq4hgwp6xcfm03d4f3h",
+  "git+https://github.com/LiGoldragon/protos?rev=3c7ade3#0.33.0": "1crw7gc7b870xxk9pavzfpyav44163izylndfr8affbsm6hd863s",
+  "git+https://github.com/LiGoldragon/signal-belief-nexus?rev=1a8bef4#0.3.3": "16k3nsz6bdjsxmlzx5r8wpg925j4w7375sswmc8fzi4i6gnblghd",
+  "git+https://github.com/LiGoldragon/signal?rev=7afb68b#10.3.0": "0yyv9bylafhnpas51gz8ppmvv0r77rmfjc0yslkjk7f82rijvrm3",
+  "git+https://github.com/LiGoldragon/translator?rev=571979d#0.3.2": "0zxk26fb05czaxd3sqgcln61c5xvmzhvjmawvph8gmhscclh34za"
+}

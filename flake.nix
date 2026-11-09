@@ -1,45 +1,69 @@
 {
   description = "Belief Nexus version 1";
+
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    rust-build = { url = "github:LiGoldragon/rust-build"; inputs.nixpkgs.follows = "nixpkgs"; };
+    base.url = "github:LiGoldragon/build-base";
+    # The generator that regenerates the committed emission for its check.
     ethos-zero.url = "github:LiGoldragon/ethos-zero";
   };
-  outputs = { self, nixpkgs, flake-utils, rust-build, ethos-zero }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-        rust = rust-build.lib.${system}.fromPkgs pkgs;
-        source = rust.cleanSource {
-          root = ./.;
-          extraFilters = [
-            (path: type: type == "regular" && pkgs.lib.hasSuffix ".ethos" (toString path))
-            (path: type: type == "regular" && pkgs.lib.hasSuffix ".sh" (toString path))
-          ];
-        };
-        cargoArtifacts = rust.craneLib.buildDepsOnly { src = source; cargoExtraArgs = "--workspace --all-features"; };
-        buildBinary = package: name: rust.craneLib.buildPackage {
-          pname = name; version = "0.2.0"; src = source; inherit cargoArtifacts;
-          cargoExtraArgs = "-p ${package} --bin ${name} --all-features";
-          doCheck = false;
-        };
-      in {
-        packages = rec {
-          nexus = buildBinary "belief-nexus-daemon" "belief-nexus-daemon";
-          translator = buildBinary "belief-nexus-translator" "belief-translator";
-          internal = rust.craneLib.buildPackage {
-            pname = "belief-nexus-internal"; version = "0.2.0"; src = source; inherit cargoArtifacts;
-            cargoExtraArgs = "-p belief-nexus-translator --bin belief-nexus --bin belief-nexus-meta --bin belief-pair --all-features";
-            doCheck = false;
-            postInstall = ''
-              mkdir -p "$out/libexec"
-              for executable in belief-nexus belief-nexus-meta belief-pair; do
-                mv "$out/bin/$executable" "$out/libexec/$executable"
-              done
-              rmdir "$out/bin"
-            '';
+
+  # Every crate, third-party or member, is one buildRustCrate derivation.
+  # Cargo.nix is generated from Cargo.lock by the build base's crate2nix and
+  # committed, so evaluation imports no derivation. After editing a
+  # Cargo.toml or Cargo.lock:
+  #   nix run github:LiGoldragon/build-base#crate2nix -- generate
+  outputs =
+    { self, base, ethos-zero }:
+    let
+      lib = base.inputs.nixpkgs.lib;
+      cargoNix = ./Cargo.nix;
+      # Every feature of a member on, as `cargo build --all-features` builds it.
+      allFeatures =
+        workspace: packageId: lib.attrNames (workspace.internal.crates.${packageId}.features or { });
+      withAllFeatures =
+        { workspace, buildRustCrateForPkgs, crateOverrides }:
+        name:
+        let
+          packageId = workspace.workspaceMembers.${name}.packageId;
+        in
+        (workspace.internal.builtRustCratesWithFeatures {
+          inherit packageId;
+          features = allFeatures workspace packageId;
+          runTests = false;
+          buildRustCrateForPkgsFunc =
+            p: (buildRustCrateForPkgs p).override { defaultCrateOverrides = crateOverrides; };
+        }).crates.${packageId}.override
+          { inherit crateOverrides; };
+      workspaces = lib.genAttrs base.lib.systems (
+        system:
+        let
+          context = base.lib.contexts.${system};
+          pkgs = context.pkgs;
+          workspace = import cargoNix {
+            inherit pkgs;
+            buildRustCrateForPkgs = context.buildRustCrateForPkgs;
+            defaultCrateOverrides = context.crateOverrides;
           };
+          member = withAllFeatures {
+            inherit workspace;
+            inherit (context) buildRustCrateForPkgs crateOverrides;
+          };
+          daemon = member "belief-nexus-daemon";
+          translatorBuild = member "belief-nexus-translator";
+          nexus = pkgs.runCommand "belief-nexus-daemon" { } ''
+            mkdir -p "$out/bin"
+            cp ${daemon}/bin/belief-nexus-daemon "$out/bin/belief-nexus-daemon"
+          '';
+          translator = pkgs.runCommand "belief-translator" { } ''
+            mkdir -p "$out/bin"
+            cp ${translatorBuild}/bin/belief-translator "$out/bin/belief-translator"
+          '';
+          internal = pkgs.runCommand "belief-nexus-internal" { } ''
+            mkdir -p "$out/libexec"
+            for executable in belief-nexus belief-nexus-meta belief-pair; do
+              cp ${translatorBuild}/bin/$executable "$out/libexec/$executable"
+            done
+          '';
           pair = pkgs.writeShellScriptBin "belief-pair" ''
             if [[ $# -ne 1 ]]; then echo "usage: belief-pair '<Place>'" >&2; exit 64; fi
             exec ${internal}/libexec/belief-pair "$1" \
@@ -54,15 +78,69 @@
             exec ${internal}/libexec/belief-nexus-meta "$1" "$2" belief-meta-translator.sock
           '';
           default = pkgs.symlinkJoin { name = "belief-nexus-v1"; paths = [ nexus translator pair cli meta-cli ]; };
-        };
-        checks = {
-          test = rust.craneLib.cargoTest {
-            pname = "belief-nexus-test"; version = "0.2.0"; src = source; inherit cargoArtifacts;
-            cargoTestExtraArgs = "--workspace --all-features";
-            nativeBuildInputs = [ pkgs.git ];
-          };
-          emission-generated = pkgs.runCommand "belief-emission-generated" {
-            generator = ethos-zero.packages.${system}.default;
+        in
+        {
+          packages = { inherit nexus translator internal pair cli meta-cli default; };
+        }
+      );
+      workspace = base.lib.workspaceOutputs {
+        inherit cargoNix;
+        memberChecks =
+          { pkgs, workspace, buildRustCrateForPkgs, crateOverrides, ... }:
+          lib.mapAttrs (
+            name: member:
+            let
+              packageId = member.packageId;
+              tests =
+                (workspace.internal.builtRustCratesWithFeatures {
+                  inherit packageId;
+                  features = allFeatures workspace packageId;
+                  runTests = true;
+                  buildRustCrateForPkgsFunc =
+                    p: (buildRustCrateForPkgs p).override { defaultCrateOverrides = crateOverrides; };
+                }).crates.${packageId}.override
+                  {
+                    buildTests = true;
+                    crateOverrides = crateOverrides // {
+                      ${name} =
+                        attributes:
+                        let
+                          given = (crateOverrides.${name} or (_: { })) attributes;
+                        in
+                        given
+                        // {
+                          preBuild = (given.preBuild or "") + ''
+                            export CARGO_TARGET_TMPDIR="$PWD/target/tmp"
+                          '';
+                          postInstall = (given.postInstall or "") + ''
+                            echo "$CARGO_TARGET_TMPDIR" > $out/target-tmpdir
+                          '';
+                        };
+                    };
+                  };
+            in
+            pkgs.runCommand "check-${name}"
+              {
+                passthru = { inherit tests; };
+                nativeBuildInputs = [ pkgs.git ];
+              }
+              ''
+                cp -r ${tests.src} "$NIX_BUILD_TOP/source"
+                chmod -R u+w "$NIX_BUILD_TOP/source"
+                cd "$NIX_BUILD_TOP/source"
+                mkdir -p "$(cat ${tests}/target-tmpdir)"
+                for binary in ${tests}/tests/*; do
+                  echo "running $(basename "$binary")"
+                  "$binary"
+                done
+                touch $out
+              ''
+          ) workspace.workspaceMembers;
+        extraChecks =
+          { pkgs, ... }:
+          {
+            emission-generated = pkgs.runCommand "belief-emission-generated" {
+            generator = ethos-zero.packages.${pkgs.stdenv.hostPlatform.system}.default;
             declaration = ./emission.ethos;
             committed = ./crates/emission/src/lib.rs;
           } ''
@@ -73,7 +151,11 @@
             ${pkgs.diffutils}/bin/cmp "$generated" "$temporary/committed-generated.rs"
             touch "$out"
           '';
-        };
-        devShells.default = pkgs.mkShell { packages = [ rust.toolchain pkgs.git ]; };
-      });
+          };
+      };
+    in
+    {
+      packages = lib.mapAttrs (system: built: workspace.packages.${system} // built.packages) workspaces;
+      inherit (workspace) checks devShells;
+    };
 }
