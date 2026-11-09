@@ -87,38 +87,12 @@
       workspace = base.lib.workspaceOutputs {
         inherit cargoNix;
         memberChecks =
-          { pkgs, workspace, buildRustCrateForPkgs, crateOverrides, ... }:
+          { pkgs, workspace, check, ... }:
           lib.mapAttrs (
             name: member:
             let
-              packageId = member.packageId;
-              tests =
-                (workspace.internal.builtRustCratesWithFeatures {
-                  inherit packageId;
-                  features = allFeatures workspace packageId;
-                  runTests = true;
-                  buildRustCrateForPkgsFunc =
-                    p: (buildRustCrateForPkgs p).override { defaultCrateOverrides = crateOverrides; };
-                }).crates.${packageId}.override
-                  {
-                    buildTests = true;
-                    crateOverrides = crateOverrides // {
-                      ${name} =
-                        attributes:
-                        let
-                          given = (crateOverrides.${name} or (_: { })) attributes;
-                        in
-                        given
-                        // {
-                          preBuild = (given.preBuild or "") + ''
-                            export CARGO_TARGET_TMPDIR="$PWD/target/tmp"
-                          '';
-                          postInstall = (given.postInstall or "") + ''
-                            echo "$CARGO_TARGET_TMPDIR" > $out/target-tmpdir
-                          '';
-                        };
-                    };
-                  };
+              # The base's own test build, so its dependencies are the base's derivations.
+              tests = (check name (allFeatures workspace member.packageId)).tests;
             in
             pkgs.runCommand "check-${name}"
               ({
