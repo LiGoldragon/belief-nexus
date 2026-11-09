@@ -123,8 +123,8 @@ fn emission_mismatch(query: &emission::Query) -> emission::Response {
     let diagnostic = wire::Diagnostic { executable_path: wire::ExecutablePath(String::new()), exit_status_option: None, string: "emission outcome configuration revision mismatch".into() };
     match query {
         emission::Query::Snapshot(repository) => emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal { repository: repository.clone(), source_operation: emission::SourceOperation::ReadingMain, source_evidence: emission::SourceEvidence::Translator(diagnostic) })),
-        emission::Query::Publish(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::StagingGeneration, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
-        emission::Query::InspectPublication(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::InspectingPointer, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
+        emission::Query::Publish(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::StagingGeneration, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
+        emission::Query::InspectPublication(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::InspectingPointer, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
         emission::Query::Clean(value) => emission::Response::CleanupRefused(wire::FileFailure { workspace: value.workspace.clone(), file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::Translator(diagnostic) }),
     }
 }
@@ -181,7 +181,7 @@ fn map_emission(refusal: emission::EmissionRefusal) -> wire::Refusal {
         emission::EmissionRefusal::Source(value) => {
             wire::Refusal::Source(map_source(value, wire::SourceOperation::Snapshotting))
         }
-        emission::EmissionRefusal::Publication(value) => wire::Refusal::File(wire::FileFailure {
+        emission::EmissionRefusal::PublicationFailed(value) => wire::Refusal::File(wire::FileFailure {
             workspace: value.workspace,
             file_operation: wire::FileOperation::Staging,
             file_evidence: wire::FileEvidence::PermissionDenied,
@@ -734,7 +734,7 @@ mod tests {
             source_operation: emission::SourceOperation::ReadingMain,
             source_evidence: emission::SourceEvidence::MainUnavailable,
         }));
-        let wrong_variant = emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+        let wrong_variant = emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace: workspace(),
             publication_operation: emission::PublicationOperation::StagingGeneration,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -887,7 +887,7 @@ mod tests {
         let next = snapshot("two", "two");
         daemon.effects.replies.extend([
             emission::Response::Snapshotted(next.clone()),
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1547,7 +1547,7 @@ mod tests {
                 source_operation: emission::SourceOperation::ReadingMain,
                 source_evidence: emission::SourceEvidence::MainUnavailable,
             })),
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1816,7 +1816,7 @@ mod tests {
         let subscription = daemon.subscribe(wire::Owner::Login(caller().user_id)).unwrap();
         daemon.effects.replies.push_back(emission::Response::Snapshotted(snapshot("two", "two")));
         daemon.effects.replies.push_back(emission::Response::EmissionRefused(
-            emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1830,7 +1830,7 @@ mod tests {
             },
         ));
         daemon.effects.replies.push_back(emission::Response::EmissionRefused(
-            emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1851,7 +1851,7 @@ mod tests {
 
     #[test]
     fn publication_refusals_are_bound_to_the_requested_workspace() {
-        let wrong_workspace_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+        let wrong_workspace_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace: workspace_named("other"),
             publication_operation: emission::PublicationOperation::ReplacingPointer,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1861,7 +1861,7 @@ mod tests {
             source_operation: emission::SourceOperation::ReadingMain,
             source_evidence: emission::SourceEvidence::MainUnavailable,
         }));
-        let matching_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+        let matching_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace: workspace(),
             publication_operation: emission::PublicationOperation::ReplacingPointer,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1934,7 +1934,7 @@ mod tests {
 
     #[test]
     fn published_state_completes_only_the_attempted_workspace() {
-        let refusal_for = |workspace| emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+        let refusal_for = |workspace| emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace,
             publication_operation: emission::PublicationOperation::StagingGeneration,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -2037,7 +2037,7 @@ mod tests {
 
     #[test]
     fn inspected_state_recovers_only_the_requested_workspace() {
-        let refusal_for = |workspace| emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+        let refusal_for = |workspace| emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace,
             publication_operation: emission::PublicationOperation::InspectingPointer,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -2202,7 +2202,7 @@ mod tests {
         daemon.effects.replies.extend([
             emission::Response::Snapshotted(snapshot("one", "one")),
             emission::Response::Snapshotted(other_snapshot("other-two", "same")),
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(
+            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(
                 emission::PublicationRefusal {
                     workspace: workspace(),
                     publication_operation: emission::PublicationOperation::StagingGeneration,
@@ -3199,10 +3199,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 self.clean_after_success(&furnished);
                 wire::Response::Furnished(furnished)
             }
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(refusal))
+            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(refusal))
                 if refusal.workspace == requested_workspace =>
             {
-                wire::Response::Refused(map_emission(emission::EmissionRefusal::Publication(refusal)))
+                wire::Response::Refused(map_emission(emission::EmissionRefusal::PublicationFailed(refusal)))
             }
             _ => wire::Response::Refused(wire::Refusal::NotReady),
         }
@@ -3387,10 +3387,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     Err(_) => Some(wire::Response::Refused(file_refusal(workspace.clone()))),
                 }
             }
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Publication(refusal))
+            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(refusal))
                 if refusal.workspace == *workspace =>
             {
-                Some(wire::Response::Refused(map_emission(emission::EmissionRefusal::Publication(refusal))))
+                Some(wire::Response::Refused(map_emission(emission::EmissionRefusal::PublicationFailed(refusal))))
             }
             _ => Some(wire::Response::Refused(wire::Refusal::NotReady)),
         }

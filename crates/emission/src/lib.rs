@@ -272,7 +272,7 @@ pub struct PublicationRefusal {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum EmissionRefusal {
     Source(SourceRefusal),
-    Publication(PublicationRefusal),
+    PublicationFailed(PublicationRefusal),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -470,7 +470,7 @@ impl FileEmission {
     fn publish(&self, publication: Publication) -> Response {
         match self.publish_result(&publication) {
             Ok(state) => Response::Published(state),
-            Err(refusal) => Response::EmissionRefused(EmissionRefusal::Publication(refusal)),
+            Err(refusal) => Response::EmissionRefused(EmissionRefusal::PublicationFailed(refusal)),
         }
     }
 
@@ -532,14 +532,14 @@ impl FileEmission {
         let workspace = PathBuf::from(&((request.workspace.0).0));
         let paths = match PublicationPaths::new(&workspace, &request.layout) {
             Ok(paths) => paths,
-            Err(evidence) => return Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+            Err(evidence) => return Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                 workspace: request.workspace,
                 publication_operation: PublicationOperation::InspectingPointer,
                 publication_evidence: evidence,
             })),
         };
         if let Err(refusal) = paths.resolve_publication(&request.publication_identity, &request.workspace) {
-            return Response::EmissionRefused(EmissionRefusal::Publication(refusal));
+            return Response::EmissionRefused(EmissionRefusal::PublicationFailed(refusal));
         }
         match paths.inspect_untrusted(&request.workspace) {
             Ok((pointer, manifest)) => Response::Inspected(PublicationInspection {
@@ -547,7 +547,7 @@ impl FileEmission {
                 publication_identity_option: pointer,
                 publication_manifest_option: manifest,
             }),
-            Err(refusal) => Response::EmissionRefused(EmissionRefusal::Publication(refusal)),
+            Err(refusal) => Response::EmissionRefused(EmissionRefusal::PublicationFailed(refusal)),
         }
     }
 
@@ -1262,7 +1262,7 @@ mod tests {
         fn assert_operation(response: Response, expected: PublicationOperation) {
             assert!(matches!(
                 response,
-                Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+                Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                     publication_operation,
                     ..
                 })) if publication_operation == expected
@@ -1337,7 +1337,7 @@ mod tests {
 
             assert!(matches!(emission.execute(Query::Publish(publication(
                 workspace.path(), "requested", None, 1, "instructions", vec![]
-            ))), Response::EmissionRefused(EmissionRefusal::Publication(_))));
+            ))), Response::EmissionRefused(EmissionRefusal::PublicationFailed(_))));
             assert_eq!(filesystem_tree(workspace.path()), before);
         }
 
@@ -1353,7 +1353,7 @@ mod tests {
 
             assert!(matches!(emission.execute(Query::Publish(publication(
                 workspace.path(), "requested", None, 1, "instructions", vec![]
-            ))), Response::EmissionRefused(EmissionRefusal::Publication(_))));
+            ))), Response::EmissionRefused(EmissionRefusal::PublicationFailed(_))));
             assert_eq!(filesystem_tree(workspace.path()), before);
         }
 
@@ -1363,7 +1363,7 @@ mod tests {
         let before = filesystem_tree(workspace.path());
         assert!(matches!(emission.execute(Query::Publish(publication(
             workspace.path(), "requested", None, 2, "instructions", vec![]
-        ))), Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+        ))), Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
             publication_evidence: PublicationEvidence::PriorRevisionMismatch(_),
             ..
         }))));
@@ -1395,7 +1395,7 @@ mod tests {
 
             assert!(matches!(
                 emission.execute(Query::Publish(requested.clone())),
-                Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+                Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                     workspace: refused_workspace,
                     publication_operation: PublicationOperation::InspectingManifest,
                     publication_evidence: PublicationEvidence::ManifestMismatch,
@@ -1417,7 +1417,7 @@ mod tests {
         let invalid = publication(workspace.path(), "../invalid", None, 1, "instructions", vec![]);
         assert!(matches!(
             emission.execute(Query::Publish(invalid)),
-            Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+            Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                 publication_operation: PublicationOperation::StagingGeneration,
                 ..
             }))
@@ -1772,7 +1772,7 @@ mod tests {
 
         let fresh = tempfile::tempdir().unwrap();
         let refused = publication(fresh.path(), "duplicate", None, 1, "instructions", duplicate_skills.clone());
-        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
             publication_operation: PublicationOperation::StagingGeneration,
             publication_evidence: PublicationEvidence::PermissionDenied,
             ..
@@ -1812,7 +1812,7 @@ mod tests {
             let refused = publication(workspace.path(), generation, None, 1, "instructions", paths.into_iter().map(|path|
                 SkillFile { relative_path: RelativePath(path.into()), content: Content(path.into()) }
             ).collect());
-            assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(EmissionRefusal::Publication(PublicationRefusal {
+            assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                 publication_operation: PublicationOperation::StagingGeneration,
                 publication_evidence: PublicationEvidence::PermissionDenied,
                 ..

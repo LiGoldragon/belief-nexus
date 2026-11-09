@@ -71,14 +71,14 @@ fn emission_failure(query: &emission::Query) -> emission::Response {
             }),
         ),
         emission::Query::Publish(value) => emission::Response::EmissionRefused(
-            emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: value.workspace.clone(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
             }),
         ),
         emission::Query::InspectPublication(value) => emission::Response::EmissionRefused(
-            emission::EmissionRefusal::Publication(emission::PublicationRefusal {
+            emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: value.workspace.clone(),
                 publication_operation: emission::PublicationOperation::InspectingPointer,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,

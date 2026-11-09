@@ -60,4 +60,4 @@ Signal
                          PermissionDenied
                          Translator.Diagnostic ]
   PublicationRefusal.{ Workspace PublicationOperation PublicationEvidence }
-  EmissionRefusal.[ Source.SourceRefusal Publication.PublicationRefusal ] ]
+  EmissionRefusal.[ Source.SourceRefusal PublicationFailed.PublicationRefusal ] ]
