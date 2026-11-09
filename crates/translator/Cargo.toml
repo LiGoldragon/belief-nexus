@@ -15,7 +15,7 @@ rkyv = { version = "0.8", default-features = false, features = ["std", "bytechec
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "d77169d", default-features = false }
 shared-translator = { package = "translator", git = "https://github.com/LiGoldragon/translator", rev = "27da70f", features = ["text", "unix"] }
 signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "c388b11", features = ["datom"] }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "baf8ce0", features = ["datom"] }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "9672f7f", features = ["datom"] }
 emission-belief-nexus = { path = "../emission", features = ["datom"] }
 nix = { version = "0.30", features = ["socket", "user", "signal", "process"] }
 

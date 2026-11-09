@@ -205,15 +205,15 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
     let sets = vec![
         meta::Set::RepositoryPolling(meta::Timeout(20)), meta::Set::SubscriberCapacity(2),
         meta::Set::OrdinaryPeers(wire::PeerList(vec![binding])), meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
-        meta::Set::LayoutOfHarness(meta::HarnessLayout { harness: wire::Harness::Codex, layout }),
-        meta::Set::LayoutOfHarness(meta::HarnessLayout { harness: wire::Harness::Claude, layout: meta::Layout {
+        meta::Set::HarnessLayout(meta::HarnessLayout { harness: wire::Harness::Codex, layout }),
+        meta::Set::HarnessLayout(meta::HarnessLayout { harness: wire::Harness::Claude, layout: meta::Layout {
             owned_root: meta::OwnedRoot(wire::RelativePath(".belief".into())), generations_directory: meta::GenerationsDirectory(wire::RelativePath("generations".into())),
             current_link: meta::CurrentLink(wire::RelativePath("current".into())), settings_file: meta::SettingsFile(wire::RelativePath("CLAUDE.md".into())),
             instructions_setting: meta::InstructionsSetting("unused-for-claude".into()), instructions_file: meta::InstructionsFile(wire::RelativePath("CLAUDE.md".into())),
             skills_directory: meta::SkillsDirectory(wire::RelativePath(".claude/skills".into())),
         } }),
-        meta::Set::PlacementOfKind(meta::PlacementDefault { kind: wire::Kind::Spirit, placement: wire::Placement::SystemPrompt }),
-        meta::Set::PlacementOfKind(meta::PlacementDefault { kind: wire::Kind::Knowledge, placement: wire::Placement::Skills }),
+        meta::Set::PlacementDefault(meta::PlacementDefault { kind: wire::Kind::Spirit, placement: wire::Placement::SystemPrompt }),
+        meta::Set::PlacementDefault(meta::PlacementDefault { kind: wire::Kind::Knowledge, placement: wire::Placement::Skills }),
         meta::Set::NexusFrameCapacity(meta::ByteLimit(1_000_000)), meta::Set::NexusTransportTimeout(meta::Timeout(1_000)),
         meta::Set::NexusSocket(meta::SocketPath("unused".into())), meta::Set::MetaNexusSocket(meta::SocketPath("unused-meta".into())),
         meta::Set::CallTimeout(meta::Timeout(1_000)), meta::Set::OutputLimit(meta::ByteLimit(1_000_000)),

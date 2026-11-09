@@ -10,7 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 belief-nexus-core = { path = "../core" }
 emission-belief-nexus = { path = "../emission" }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "baf8ce0" }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "9672f7f" }
 nix = { version = "0.30", features = ["socket", "user"] }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "d77169d", default-features = false }

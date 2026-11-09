@@ -92,8 +92,8 @@ fn setting_name(set: &meta::Set) -> meta::SettingName {
         meta::Set::SubscriberCapacity(_) => meta::SettingName::SubscriberCapacity,
         meta::Set::OrdinaryPeers(_) => meta::SettingName::OrdinaryPeers,
         meta::Set::MetaPeers(_) => meta::SettingName::MetaPeers,
-        meta::Set::LayoutOfHarness(value) => meta::SettingName::LayoutOfHarness(value.harness.clone()),
-        meta::Set::PlacementOfKind(value) => meta::SettingName::PlacementOfKind(value.kind.clone()),
+        meta::Set::HarnessLayout(value) => meta::SettingName::LayoutOfHarness(value.harness.clone()),
+        meta::Set::PlacementDefault(value) => meta::SettingName::PlacementOfKind(value.kind.clone()),
         meta::Set::GenerationRetention(_) => meta::SettingName::GenerationRetention,
         meta::Set::NexusFrameCapacity(_) => meta::SettingName::NexusFrameCapacity,
         meta::Set::NexusTransportTimeout(_) => meta::SettingName::NexusTransportTimeout,
@@ -2850,11 +2850,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             meta::Set::MetaPeers(value) => {
                 self.memory.configuration.meta_peers = Some(value.clone())
             }
-            meta::Set::LayoutOfHarness(value) => {
+            meta::Set::HarnessLayout(value) => {
                 self.memory.configuration.layouts.retain(|current| current.harness != value.harness);
                 self.memory.configuration.layouts.push(value.clone());
             }
-            meta::Set::PlacementOfKind(value) => {
+            meta::Set::PlacementDefault(value) => {
                 self.memory.configuration.placements.retain(|current| current.kind != value.kind);
                 self.memory.configuration.placements.push(value.clone());
             }
