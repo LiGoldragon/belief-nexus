@@ -39,14 +39,12 @@
         let
           context = base.lib.contexts.${system};
           pkgs = context.pkgs;
-          workspace = import cargoNix {
-            inherit pkgs;
-            buildRustCrateForPkgs = context.buildRustCrateForPkgs;
-            defaultCrateOverrides = context.crateOverrides;
-          };
+          composed = base.lib.workspace.${system} { inherit cargoNix; };
+          workspace = composed.workspace;
           member = withAllFeatures {
             inherit workspace;
-            inherit (context) buildRustCrateForPkgs crateOverrides;
+            inherit (composed) buildRustCrateForPkgs;
+            inherit (context) crateOverrides;
           };
           daemon = member "belief-nexus-daemon";
           translatorBuild = member "belief-nexus-translator";
@@ -145,8 +143,8 @@
           let
           lintChecks = lib.listToAttrs (
             lib.concatMap (member: [
-              { name = "clippy-${member}"; value = clippy member [ "default" ] [ "-D" "warnings" ]; }
-              { name = "doc-${member}"; value = doc member [ "default" ] [ "-D" "warnings" ]; }
+              { name = "clippy-${member}"; value = clippy member (allFeatures workspace workspace.workspaceMembers.${member}.packageId) [ "-D" "warnings" ]; }
+              { name = "doc-${member}"; value = doc member (allFeatures workspace workspace.workspaceMembers.${member}.packageId) [ "-D" "warnings" ]; }
             ]) (lib.attrNames workspace.workspaceMembers)
           );
           in
