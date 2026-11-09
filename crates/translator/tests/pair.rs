@@ -14,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn sibling(name: &str) -> PathBuf {
-    let executable = std::env::current_exe().unwrap();
-    let directory = executable.parent().unwrap().parent().unwrap();
-    let path = directory.join(name);
+fn nexus_daemon() -> PathBuf {
+    let path = PathBuf::from(
+        std::env::var_os("BELIEF_NEXUS_DAEMON")
+            .expect("BELIEF_NEXUS_DAEMON names the built belief-nexus-daemon executable"),
+    );
     assert!(
         path.exists(),
-        "the workspace binary {name} is built beside the test binaries: {}",
+        "BELIEF_NEXUS_DAEMON names an existing executable: {}",
         path.display()
     );
     path
@@ -81,7 +82,7 @@ fn the_real_launcher_nexus_and_translator_answer_one_configure_and_reap_together
     };
     let deployment = Deployment {
         nexus_executable: NexusExecutable(
-            sibling("belief-nexus-daemon")
+            nexus_daemon()
                 .to_string_lossy()
                 .into_owned(),
         ),

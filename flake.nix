@@ -120,10 +120,14 @@
                   };
             in
             pkgs.runCommand "check-${name}"
-              {
+              ({
                 passthru = { inherit tests; };
                 nativeBuildInputs = [ pkgs.git ];
               }
+              // lib.optionalAttrs (name == "belief-nexus-translator") {
+                # The translator's pair test launches the built daemon.
+                BELIEF_NEXUS_DAEMON = "${workspaces.${pkgs.stdenv.hostPlatform.system}.packages.nexus}/bin/belief-nexus-daemon";
+              })
               ''
                 cp -r ${tests.src} "$NIX_BUILD_TOP/source"
                 chmod -R u+w "$NIX_BUILD_TOP/source"
