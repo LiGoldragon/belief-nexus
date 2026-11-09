@@ -141,8 +141,16 @@
               ''
           ) workspace.workspaceMembers;
         extraChecks =
-          { pkgs, ... }:
-          {
+          { pkgs, workspace, clippy, doc, ... }:
+          let
+          lintChecks = lib.listToAttrs (
+            lib.concatMap (member: [
+              { name = "clippy-${member}"; value = clippy member [ "default" ] [ "-D" "warnings" ]; }
+              { name = "doc-${member}"; value = doc member [ "default" ] [ "-D" "warnings" ]; }
+            ]) (lib.attrNames workspace.workspaceMembers)
+          );
+          in
+          lintChecks // {
             emission-generated = pkgs.runCommand "belief-emission-generated" {
             generator = ethos-zero.packages.${pkgs.stdenv.hostPlatform.system}.default;
             declaration = ./crates/emission/emission.ethos;

@@ -42,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         place: place.clone(),
         memory_file_name: meta::MemoryFileName(deployment.memory_file_name.0.clone()),
         admission: deployment.admission.clone(),
-        paired_translator: meta::PairedTranslator { user_id: uid.clone(), group_id: gid.clone(), process_id: ProcessId(0) },
+        paired_translator: meta::PairedTranslator { user_id: uid, group_id: gid, process_id: ProcessId(0) },
         bootstrap_owner: meta::BootstrapOwner(deployment.owner.clone()),
     };
     meta::Validating::validated(&configured, uid.0).map_err(|refusal| format!("bootstrap refused before any effect: {refusal:?}"))?;
@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrapped = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut input = nexus.stdin.take().ok_or("Nexus bootstrap pipe")?;
         let bootstrap = meta::NexusBootstrap {
-            paired_translator: meta::PairedTranslator { user_id: uid.clone(), group_id: gid.clone(), process_id: ProcessId(i64::from(translator.id())) },
+            paired_translator: meta::PairedTranslator { user_id: uid, group_id: gid, process_id: ProcessId(i64::from(translator.id())) },
             ..configured.clone()
         };
         input.write_frame(&FrameBody::from(<meta::NexusBootstrap as meta::Enveloped>::envelope()), capacity)?;

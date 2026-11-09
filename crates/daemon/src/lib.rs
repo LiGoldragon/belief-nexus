@@ -52,7 +52,7 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
                 .map_err(|_| ())?;
             let context = PublicationContext {
                 owner: workspace.owner.clone(),
-                configuration_revision: workspace.configuration_revision.clone(),
+                configuration_revision: workspace.configuration_revision,
                 layout: workspace.layout.clone(),
                 retention_policy: workspace.retention.clone(),
             };
@@ -523,7 +523,7 @@ mod tests {
         let plan = core.prepare_furnish_with_defaults(stored.request.clone(), &defaults).unwrap();
         let publication = core.begin_publication(&plan, PublicationContext {
             owner: stored.owner.clone(),
-            configuration_revision: stored.configuration_revision.clone(),
+            configuration_revision: stored.configuration_revision,
             layout: stored.layout.clone(),
             retention_policy: stored.retention.clone(),
         }).unwrap();
@@ -554,7 +554,7 @@ mod tests {
         let furnished = daemon.handle(wire::Call { caller: second.clone(), query: wire::Query::Furnish(furnish_request()) });
         assert!(matches!(furnished, wire::Response::Furnished(_)), "same login lost ownership: {furnished:?}");
 
-        let current = daemon.memory.configuration.revision.clone();
+        let current = daemon.memory.configuration.revision;
         let configured = daemon.configure(meta::MetaCall { caller: second, query: meta::Query::Configure(meta::ConfigureRequest {
             configuration_revision_option: Some(current), set: meta::Set::RepositoryPolling(meta::Timeout(200)),
         }) });
@@ -562,10 +562,10 @@ mod tests {
         let unconditional = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(1001) }, query: meta::Query::Configure(meta::ConfigureRequest {
             configuration_revision_option: None, set: meta::Set::RepositoryPolling(meta::Timeout(250)),
         }) });
-        let expected_revision = daemon.memory.configuration.revision.clone();
+        let expected_revision = daemon.memory.configuration.revision;
         assert!(matches!(unconditional, meta::Response::Configured(meta::ConfiguredState { configuration_revision, .. }) if configuration_revision == expected_revision));
         let refused = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(2000), process_id: translator::ProcessId(999) }, query: meta::Query::Configure(meta::ConfigureRequest {
-            configuration_revision_option: Some(daemon.memory.configuration.revision.clone()), set: meta::Set::RepositoryPolling(meta::Timeout(300)),
+            configuration_revision_option: Some(daemon.memory.configuration.revision), set: meta::Set::RepositoryPolling(meta::Timeout(300)),
         }) });
         assert!(matches!(refused, meta::Response::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(_))));
     }
@@ -1010,7 +1010,7 @@ mod tests {
             workspace: workspace(),
             publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: pending.generation_id.clone(),
-                publication_revision: pending.intended_publication.0.clone(),
+                publication_revision: pending.intended_publication.0,
             }),
             publication_manifest_option: Some(emission::PublicationManifest {
                 generation_id: pending.generation_id,
@@ -1622,7 +1622,7 @@ mod tests {
         register(&mut daemon);
         let first_owner = peer_owner("client");
         let second_owner = peer_owner("other");
-        let login_owner = wire::Owner::Login(caller().user_id.clone());
+        let login_owner = wire::Owner::Login(caller().user_id);
         for (owner, name) in [
             (first_owner.clone(), "first"),
             (second_owner.clone(), "second"),
@@ -1813,7 +1813,7 @@ mod tests {
             daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
             wire::Response::Furnished(_)
         ));
-        let subscription = daemon.subscribe(wire::Owner::Login(caller().user_id.clone())).unwrap();
+        let subscription = daemon.subscribe(wire::Owner::Login(caller().user_id)).unwrap();
         daemon.effects.replies.push_back(emission::Response::Snapshotted(snapshot("two", "two")));
         daemon.effects.replies.push_back(emission::Response::EmissionRefused(
             emission::EmissionRefusal::Publication(emission::PublicationRefusal {
@@ -1990,7 +1990,7 @@ mod tests {
             workspace: second.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: second_publication.generation_id.clone(),
-                publication_revision: second_publication.intended_publication.0.clone(),
+                publication_revision: second_publication.intended_publication.0,
             },
         }));
         assert!(matches!(daemon.publish(first_publication.clone()), wire::Response::Refused(wire::Refusal::NotReady)));
@@ -2010,7 +2010,7 @@ mod tests {
             workspace: first.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: wire::GenerationId("wrong".into()),
-                publication_revision: first_publication.intended_publication.0.clone(),
+                publication_revision: first_publication.intended_publication.0,
             },
         }));
         assert!(matches!(
@@ -2023,7 +2023,7 @@ mod tests {
             workspace: first.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: first_publication.generation_id.clone(),
-                publication_revision: first_publication.intended_publication.0.clone(),
+                publication_revision: first_publication.intended_publication.0,
             },
         }));
         assert!(matches!(daemon.publish(first_publication), wire::Response::Furnished(wire::FurnishedWorkspace { workspace, .. }) if workspace == first));
@@ -2046,7 +2046,7 @@ mod tests {
             workspace,
             publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: publication.generation_id.clone(),
-                publication_revision: publication.intended_publication.0.clone(),
+                publication_revision: publication.intended_publication.0,
             }),
             publication_manifest_option: Some(emission::PublicationManifest {
                 generation_id: publication.generation_id.clone(),
@@ -2118,7 +2118,7 @@ mod tests {
             workspace: first.clone(),
             publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: wire::GenerationId("wrong".into()),
-                publication_revision: first_publication.intended_publication.0.clone(),
+                publication_revision: first_publication.intended_publication.0,
             }),
             publication_manifest_option: None,
         }));
@@ -2195,7 +2195,7 @@ mod tests {
             daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
             wire::Response::Furnished(_)
         ));
-        let owner = wire::Owner::Login(caller().user_id.clone());
+        let owner = wire::Owner::Login(caller().user_id);
         let owned = daemon.subscribe(owner).unwrap();
         let other = daemon.subscribe(peer_owner("client")).unwrap();
 
@@ -2552,7 +2552,7 @@ impl Configuration {
     fn translator_configuration(&self) -> meta::TranslatorConfiguration {
         let missing = self.translator_missing();
         meta::TranslatorConfiguration {
-            configuration_revision: self.revision.clone(),
+            configuration_revision: self.revision,
             set_vector: self.translator_sets.clone(),
             readiness: if missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(missing) },
         }
@@ -2675,7 +2675,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         validate_bootstrap(&bootstrap.nexus)?;
         let loaded = store.load().map_err(BootstrapError::Memory)?;
         let bootstrap_owner = bootstrap.nexus.bootstrap_owner.0.clone();
-        let mut memory = loaded.clone().unwrap_or_else(|| MemoryImage::empty(bootstrap_owner));
+        let memory = loaded.clone().unwrap_or_else(|| MemoryImage::empty(bootstrap_owner));
         if memory.next_event_sequence < 1 || memory.configuration.revision.0 < 0 {
             return Err(BootstrapError::CorruptState);
         }
@@ -2725,9 +2725,9 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     fn emit_effect(&mut self, query: emission::Query) -> emission::Response {
-        let revision = self.memory.configuration.revision.clone();
+        let revision = self.memory.configuration.revision;
         let attempt = emission::EmissionAttempt {
-            configuration_revision: revision.clone(),
+            configuration_revision: revision,
             translator_configuration: self.memory.configuration.translator_configuration(),
             query: query.clone(),
         };
@@ -2736,7 +2736,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn handle(&mut self, call: wire::Call) -> wire::Response {
-        let owner = wire::Owner::Login(call.caller.user_id.clone());
+        let owner = wire::Owner::Login(call.caller.user_id);
         self.handle_as(call, owner)
     }
 
@@ -2773,7 +2773,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn open_subscription(&mut self, call: wire::Call) -> Result<Subscription, wire::Response> {
-        let owner = wire::Owner::Login(call.caller.user_id.clone());
+        let owner = wire::Owner::Login(call.caller.user_id);
         self.open_subscription_as(call, owner)
     }
 
@@ -2793,11 +2793,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn polling_timeout(&self) -> Option<meta::Timeout> {
-        self.memory.configuration.repository_polling.clone()
+        self.memory.configuration.repository_polling
     }
 
     pub fn configure(&mut self, call: meta::MetaCall) -> meta::Response {
-        if self.memory.owner != wire::Owner::Login(call.caller.user_id.clone()) {
+        if self.memory.owner != wire::Owner::Login(call.caller.user_id) {
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(
                 call.caller,
             ));
@@ -2809,7 +2809,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::StaleRevision(
                 meta::StaleRevision {
                     configuration_revision_option: request.configuration_revision_option,
-                    configuration_revision: self.memory.configuration.revision.clone(),
+                    configuration_revision: self.memory.configuration.revision,
                 },
             ));
         }
@@ -2839,7 +2839,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let previous = self.memory.configuration.clone();
         match &set {
             meta::Set::RepositoryPolling(value) => {
-                self.memory.configuration.repository_polling = Some(value.clone())
+                self.memory.configuration.repository_polling = Some(*value)
             }
             meta::Set::SubscriberCapacity(value) => {
                 self.memory.configuration.subscriber_capacity = Some(*value)
@@ -2861,8 +2861,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             meta::Set::GenerationRetention(value) => {
                 self.memory.configuration.retention = value.clone()
             }
-            meta::Set::NexusFrameCapacity(value) => self.memory.configuration.nexus_frame_capacity = Some(value.clone()),
-            meta::Set::NexusTransportTimeout(value) => self.memory.configuration.nexus_transport_timeout = Some(value.clone()),
+            meta::Set::NexusFrameCapacity(value) => self.memory.configuration.nexus_frame_capacity = Some(*value),
+            meta::Set::NexusTransportTimeout(value) => self.memory.configuration.nexus_transport_timeout = Some(*value),
             _ if setting_owner(&set) == meta::Keeper::Translator => {
                 let name = setting_name(&set);
                 self.memory.configuration.translator_sets.retain(|current| setting_name(current) != name);
@@ -2879,7 +2879,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         meta::Response::Configured(meta::ConfiguredState {
             set,
             keeper,
-            configuration_revision: self.memory.configuration.revision.clone(),
+            configuration_revision: self.memory.configuration.revision,
             readiness: self.memory.configuration.readiness(),
         })
     }
@@ -3088,7 +3088,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             }
         }
         let previous = self.memory.clone();
-        let revision = self.memory.configuration.revision.clone();
+        let revision = self.memory.configuration.revision;
         let Some(layout) = self.memory.configuration.layout_for(&request.harness) else { return wire::Response::Refused(wire::Refusal::NotReady) };
         let placement_defaults = self.memory.configuration.placements.clone();
         let defaults = self.memory.configuration.placement_defaults();
@@ -3101,7 +3101,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             &plan,
             PublicationContext {
                 owner: owner.clone(),
-                configuration_revision: revision.clone(),
+                configuration_revision: revision,
                 layout: layout.clone(),
                 retention_policy: retention.clone(),
             },
@@ -3263,7 +3263,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .filter_map(|record| record.pending.as_ref())
             .map(|pending| emission::PublicationIdentity {
                 generation_id: pending.generation_id.clone(),
-                publication_revision: pending.intended_publication.0.clone(),
+                publication_revision: pending.intended_publication.0,
             })
             .collect();
         stored
@@ -3272,7 +3272,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .take(removable)
             .filter(|generation| !protected.contains(&emission::PublicationIdentity {
                 generation_id: generation.generation_id.clone(),
-                publication_revision: generation.publication_revision.clone(),
+                publication_revision: generation.publication_revision,
             }))
             .cloned()
             .collect()
@@ -3287,7 +3287,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             workspace: maintenance.workspace.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: maintenance.generation_id.clone(),
-                publication_revision: maintenance.publication_revision.clone(),
+                publication_revision: maintenance.publication_revision,
             },
             layout: stored.layout,
         };
@@ -3333,7 +3333,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 workspace: workspace.clone(),
                 publication_identity: emission::PublicationIdentity {
                     generation_id: stored.pending.as_ref()?.generation_id.clone(),
-                    publication_revision: stored.pending.as_ref()?.intended_publication.0.clone(),
+                    publication_revision: stored.pending.as_ref()?.intended_publication.0,
                 },
                 layout: stored.layout.clone(),
             },
@@ -3512,14 +3512,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         for workspace in workspaces {
             let owner = self.workspace(&workspace).map(|record| record.owner.clone());
             if let Some(response) = self.recover_one(&workspace) {
-                match (response, owner) {
-                    (wire::Response::Refused(refusal), Some(owner)) => {
-                        self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
-                            workspace,
-                            refusal_kind: refusal_kind(&refusal),
-                        }));
-                    }
-                    _ => {}
+                if let (wire::Response::Refused(refusal), Some(owner)) = (response, owner) {
+                    self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                        workspace,
+                        refusal_kind: refusal_kind(&refusal),
+                    }));
                 }
             }
         }
@@ -3593,7 +3590,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     }
 
     pub fn login_owner(&self, caller: &translator::Caller) -> Option<wire::Owner> {
-        let owner = wire::Owner::Login(caller.user_id.clone());
+        let owner = wire::Owner::Login(caller.user_id);
         self.owner_allowed(&owner).then_some(owner)
     }
 

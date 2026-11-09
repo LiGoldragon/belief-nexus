@@ -1,4 +1,4 @@
-use crate::{meta_transport, observe_peer, serve_emission, serve_meta_text, serve_public_text, TranslatorConfiguration, TranslatorError};
+use crate::{meta_transport, serve_emission, serve_meta_text, serve_public_text, TranslatorConfiguration, TranslatorError};
 use meta_signal_belief_nexus as meta;
 use signal::Contracted as _;
 use signal_belief_nexus as public;
@@ -11,9 +11,6 @@ fn public_digest() -> public::ContractDigest {
 }
 fn meta_digest() -> public::ContractDigest {
     public::ContractDigest(format!("signal:{}", meta::Query::contract_digest().0))
-}
-fn emission_digest() -> public::ContractDigest {
-    public::ContractDigest(format!("signal:{}", emission_belief_nexus::Query::contract_digest().0))
 }
 
 struct GateState { configuration: TranslatorConfiguration, restored: bool }
@@ -77,7 +74,7 @@ fn serve_ordinary(
 ) -> Result<(), TranslatorError> {
     let credentials = shared_translator::unix::peer_credentials(stream).map_err(|error| TranslatorError::Peer(error.to_string()))?;
     if credentials.user_id == paired.user_id && credentials.group_id == paired.group_id && credentials.process_id == paired.process_id {
-        serve_emission(stream, bootstrap_capacity, paired, emission_digest())
+        serve_emission(stream, bootstrap_capacity, paired)
     } else {
         let mut state = gate.state.lock().map_err(|_| TranslatorError::Configuration("configuration lock poisoned".into()))?;
         while !state.restored || !state.configuration.ready() {

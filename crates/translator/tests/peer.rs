@@ -23,9 +23,9 @@ fn live_kernel_peer_identity_is_authority_and_digest_is_compatibility() {
     let digest = public::ContractDigest("signal:compatible".into());
     let observed = observe_peer(&stream, digest.clone()).unwrap();
     assert_eq!(observed.process_id.0, i64::from(child.id()));
-    let configured = shared_translator::PeerBinding { peer_id: shared_translator::PeerId("nexus".into()), peer_identity: shared_translator::PeerIdentity { user_id: observed.user_id.clone(), process_id: observed.process_id.clone() } };
+    let configured = shared_translator::PeerBinding { peer_id: shared_translator::PeerId("nexus".into()), peer_identity: shared_translator::PeerIdentity { user_id: observed.user_id, process_id: observed.process_id } };
     assert!(admit_peer(observed.clone(), &public::PeerList(vec![configured.clone()])).is_ok());
-    let incompatible = shared_translator::PeerBinding { peer_id: configured.peer_id, peer_identity: shared_translator::PeerIdentity { user_id: observed.user_id.clone(), process_id: shared_translator::ProcessId(observed.process_id.0 + 1) } };
+    let incompatible = shared_translator::PeerBinding { peer_id: configured.peer_id, peer_identity: shared_translator::PeerIdentity { user_id: observed.user_id, process_id: shared_translator::ProcessId(observed.process_id.0 + 1) } };
     assert!(admit_peer(observed, &public::PeerList(vec![incompatible])).is_err());
     child.wait().unwrap();
 }

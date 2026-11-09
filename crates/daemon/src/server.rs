@@ -35,7 +35,7 @@ impl SocketEmission {
 impl EmissionPort for SocketEmission {
     fn emit(&mut self, attempt: emission::EmissionAttempt) -> emission::EmissionAttemptOutcome {
         let fallback = emission::EmissionAttemptOutcome {
-            configuration_revision: attempt.configuration_revision.clone(),
+            configuration_revision: attempt.configuration_revision,
             response: emission_failure(&attempt.query),
         };
         let Ok(signal) = attempt.signalize() else {
@@ -379,7 +379,7 @@ mod tests {
         };
         let identity = translator::PeerBinding {
             peer_id: translator::PeerId("test".into()),
-            peer_identity: translator::PeerIdentity { user_id: caller.user_id.clone(), process_id: caller.process_id.clone() },
+            peer_identity: translator::PeerIdentity { user_id: caller.user_id, process_id: caller.process_id },
         };
         let ordinary = directory.path().join("ordinary.sock");
         let privileged = directory.path().join("meta.sock");
@@ -408,11 +408,11 @@ mod tests {
                 timeout: meta::Timeout(1_000),
             },
             paired_translator: meta::PairedTranslator {
-                user_id: caller.user_id.clone(),
+                user_id: caller.user_id,
                 group_id: translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
-                process_id: caller.process_id.clone(),
+                process_id: caller.process_id,
             },
-            bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(caller.user_id.clone())),
+            bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(caller.user_id)),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let running = Arc::clone(&stop);

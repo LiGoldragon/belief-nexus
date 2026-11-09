@@ -195,7 +195,7 @@ impl TranslatorConfiguration {
             }
             configuration.apply_set(set.clone())?;
         }
-        configuration.revision = Some(snapshot.configuration_revision.clone());
+        configuration.revision = Some(snapshot.configuration_revision);
         configuration.snapshot_ready = matches!(snapshot.readiness, meta::Readiness::Ready);
         let derived = if configuration.missing().is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(configuration.missing()) };
         if derived != snapshot.readiness {
@@ -219,7 +219,7 @@ impl TranslatorConfiguration {
             }
             candidate.apply_set(set.clone())?;
         }
-        candidate.revision = Some(snapshot.configuration_revision.clone());
+        candidate.revision = Some(snapshot.configuration_revision);
         let stored_missing = translator_set_missing(&snapshot.set_vector);
         let derived = if stored_missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(stored_missing) };
         if derived != snapshot.readiness { return Err(TranslatorError::Configuration("translator readiness is not derived from its stored settings".into())); }
@@ -249,7 +249,7 @@ impl TranslatorConfiguration {
         if configured.keeper == meta::Keeper::Translator {
             candidate.apply_set(configured.set.clone())?;
         }
-        candidate.revision = Some(configured.configuration_revision.clone());
+        candidate.revision = Some(configured.configuration_revision);
         candidate.snapshot_ready = matches!(configured.readiness, meta::Readiness::Ready);
         *self = candidate;
         Ok(())
@@ -450,11 +450,10 @@ pub fn serve_emission(
     stream: &mut UnixStream,
     capacity: signal::FrameCapacity,
     expected_process: &meta::PairedProcess,
-    contract_digest: public::ContractDigest,
 ) -> Result<(), TranslatorError> {
     use signal::{FrameReading, FrameWriting};
     let credentials = shared_translator::unix::peer_credentials(stream).map_err(|error| TranslatorError::Peer(error.to_string()))?;
-    let caller = shared_translator::Caller { process_id: credentials.process_id.clone(), user_id: credentials.user_id.clone() };
+    let caller = shared_translator::Caller { process_id: credentials.process_id, user_id: credentials.user_id };
     if credentials.user_id != expected_process.user_id || credentials.group_id != expected_process.group_id || credentials.process_id != expected_process.process_id {
         return Err(TranslatorError::Peer("caller is not the paired Nexus process".into()));
     }
@@ -485,7 +484,7 @@ mod tests {
     use super::*;
 
     fn complete_snapshot(revision: i64, caller: &shared_translator::Caller) -> meta::TranslatorConfiguration {
-        let peer = shared_translator::PeerBinding { peer_id: shared_translator::PeerId("nexus".into()), peer_identity: shared_translator::PeerIdentity { user_id: caller.user_id.clone(), process_id: caller.process_id.clone() } };
+        let peer = shared_translator::PeerBinding { peer_id: shared_translator::PeerId("nexus".into()), peer_identity: shared_translator::PeerIdentity { user_id: caller.user_id, process_id: caller.process_id } };
         meta::TranslatorConfiguration {
             configuration_revision: meta::ConfigurationRevision(revision),
             set_vector: vec![
@@ -542,7 +541,7 @@ mod tests {
         let digest = public::ContractDigest("sha256:belief".into());
         let caller = observe_peer(&left, digest.clone()).unwrap();
         assert!(caller.process_id.0 > 0);
-        let peers = public::PeerList(vec![shared_translator::PeerBinding { peer_id: shared_translator::PeerId("test-peer".into()), peer_identity: shared_translator::PeerIdentity { user_id: caller.user_id.clone(), process_id: caller.process_id.clone() } }]);
+        let peers = public::PeerList(vec![shared_translator::PeerBinding { peer_id: shared_translator::PeerId("test-peer".into()), peer_identity: shared_translator::PeerIdentity { user_id: caller.user_id, process_id: caller.process_id } }]);
         let admitted = admit_peer(caller.clone(), &peers).unwrap();
         assert_eq!(admitted.peer_id, shared_translator::PeerId("test-peer".into()));
         assert_eq!(admitted.caller.process_id, caller.process_id);

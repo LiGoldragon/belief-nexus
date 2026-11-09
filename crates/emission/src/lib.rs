@@ -489,13 +489,13 @@ impl FileEmission {
         }
 
         let current = paths.inspect_current(publication)?;
-        let observed = current.as_ref().map(|(_, manifest)| (manifest.intended_publication.0).clone());
+        let observed = current.as_ref().map(|(_, manifest)| manifest.intended_publication.0);
         if observed != publication.prior_publication.0 {
             return Err(publication_refusal(
                 publication,
                 PublicationOperation::InspectingManifest,
                 PublicationEvidence::PriorRevisionMismatch(RevisionEvidence {
-                    expected_revision: ExpectedRevision(publication.prior_publication.0.clone()),
+                    expected_revision: ExpectedRevision(publication.prior_publication.0),
                     observed_revision: ObservedRevision(observed),
                 }),
             ));
@@ -601,7 +601,7 @@ impl Publication {
     fn identity(&self) -> PublicationIdentity {
         PublicationIdentity {
             generation_id: self.generation_id.clone(),
-            publication_revision: self.intended_publication.0.clone(),
+            publication_revision: self.intended_publication.0,
         }
     }
 
@@ -620,7 +620,7 @@ impl PublicationManifest {
     fn identity(&self) -> PublicationIdentity {
         PublicationIdentity {
             generation_id: self.generation_id.clone(),
-            publication_revision: self.intended_publication.0.clone(),
+            publication_revision: self.intended_publication.0,
         }
     }
 }
@@ -896,7 +896,7 @@ impl PublicationPaths {
                 publication,
                 PublicationOperation::ReplacingPointer,
                 PublicationEvidence::PriorRevisionMismatch(RevisionEvidence {
-                    expected_revision: ExpectedRevision(publication.prior_publication.0.clone()),
+                    expected_revision: ExpectedRevision(publication.prior_publication.0),
                     observed_revision: ObservedRevision(observed),
                 }),
             ));

@@ -308,7 +308,7 @@ impl BeliefCore {
             .workspaces
             .get(&plan.workspace)
             .and_then(|record| record.successful.as_ref())
-            .map(|successful| successful.publication_revision.clone());
+            .map(|successful| successful.publication_revision);
         let intended = wire::PublicationRevision(
             prior
                 .as_ref()
@@ -367,7 +367,7 @@ impl BeliefCore {
             .ok_or(CompletionError::NoPendingPublication)?;
         let expected_identity = emission::PublicationIdentity {
             generation_id: pending.intent.publication.generation_id.clone(),
-            publication_revision: pending.intent.publication.intended_publication.0.clone(),
+            publication_revision: pending.intent.publication.intended_publication.0,
         };
         if state.publication_identity != expected_identity {
             return Err(CompletionError::PublicationIdentityMismatch);
@@ -389,7 +389,7 @@ impl BeliefCore {
             .ok_or(CompletionError::NoPendingPublication)?;
         let expected_pointer = emission::PublicationIdentity {
             generation_id: pending.intent.publication.generation_id.clone(),
-            publication_revision: pending.intent.publication.intended_publication.0.clone(),
+            publication_revision: pending.intent.publication.intended_publication.0,
         };
         let expected_manifest = manifest_of(&pending.intent.publication);
         if inspection.publication_identity_option.as_ref() == Some(&expected_pointer) {
@@ -406,7 +406,7 @@ impl BeliefCore {
             .and_then(|record| record.successful.as_ref())
             .map(|successful| emission::PublicationIdentity {
                 generation_id: successful.generation_id.clone(),
-                publication_revision: successful.publication_revision.clone(),
+                publication_revision: successful.publication_revision,
             });
         if inspection.publication_identity_option == prior_pointer {
             Ok(RecoveryOutcome::Retry)
@@ -528,7 +528,7 @@ impl BeliefCore {
         let missing = publication.missing_modules.0.clone();
         record.successful = Some(SuccessfulPublication {
             generation_id: publication.generation_id.clone(),
-            publication_revision: publication.intended_publication.0.clone(),
+            publication_revision: publication.intended_publication.0,
             source_revisions: publication
                 .repository_states
                 .0
@@ -1274,7 +1274,7 @@ mod tests {
             workspace: workspace("/w"),
             publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: publication.generation_id.clone(),
-                publication_revision: publication.intended_publication.0.clone(),
+                publication_revision: publication.intended_publication.0,
             }),
             publication_manifest_option: None,
         };
@@ -1288,7 +1288,7 @@ mod tests {
             workspace: workspace("/w"),
             publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: publication.generation_id.clone(),
-                publication_revision: publication.intended_publication.0.clone(),
+                publication_revision: publication.intended_publication.0,
             }),
             publication_manifest_option: Some(manifest_of(&publication)),
         };

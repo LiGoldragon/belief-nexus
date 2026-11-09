@@ -89,7 +89,7 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
         user_id: translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
         process_id: translator::ProcessId(i64::from(std::process::id())),
     };
-    let identity = translator::PeerBinding { peer_id: translator::PeerId("process-test".into()), peer_identity: translator::PeerIdentity { user_id: caller.user_id.clone(), process_id: caller.process_id.clone() } };
+    let identity = translator::PeerBinding { peer_id: translator::PeerId("process-test".into()), peer_identity: translator::PeerIdentity { user_id: caller.user_id, process_id: caller.process_id } };
     let ordinary = directory.path().join("ordinary.sock");
     let privileged = directory.path().join("meta.sock");
     let emission_socket = directory.path().join("translator.sock");
@@ -130,11 +130,11 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
             timeout: meta::Timeout(1_000),
         },
         paired_translator: meta::PairedTranslator {
-            user_id: caller.user_id.clone(),
+            user_id: caller.user_id,
             group_id: translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
-            process_id: caller.process_id.clone(),
+            process_id: caller.process_id,
         },
-        bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(caller.user_id.clone())),
+        bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(caller.user_id)),
     };
     let mut child = Command::new(env!("CARGO_BIN_EXE_belief-nexus-daemon"))
         .stdin(Stdio::piped())
