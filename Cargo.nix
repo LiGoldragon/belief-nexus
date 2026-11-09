@@ -1112,13 +1112,13 @@ rec {
       };
       "meta-signal-belief-nexus" = rec {
         crateName = "meta-signal-belief-nexus";
-        version = "0.6.0";
+        version = "0.6.1";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-belief-nexus";
-          rev = "a624c14995c867ef4ecd4e603b61effc2d730bfa";
-          sha256 = "1k0vmab89jygsgv1cp9jygd9q6bg26wj7waas4xkxki8nwlr1apv";
+          rev = "eb43351e8ad155b555842a8ab7e9e46eaf8bf97f";
+          sha256 = "0amw5gi93ncfq5chlcsbfhfxm082lglad42l94vnvw36sbrv8zmn";
         };
         libName = "meta_signal_belief_nexus";
         dependencies = [
@@ -1152,6 +1152,7 @@ rec {
             name = "translator";
             packageId = "translator";
             usesDefaultFeatures = false;
+            features = [ "unix" ];
           }
         ];
         features = {
@@ -1835,13 +1836,13 @@ rec {
       };
       "signal-belief-nexus" = rec {
         crateName = "signal-belief-nexus";
-        version = "0.4.1";
+        version = "0.4.2";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-belief-nexus";
-          rev = "a6d3bda2406c67486c9395c9e9547b84d34407d1";
-          sha256 = "1gdhn0ccwryb0scv8f4f7rsr1bcazicz7q30xpv1rp30q5cqpv41";
+          rev = "011eea2aa83bc07db1fb318b7dcb4d30267e7c2d";
+          sha256 = "0nmkmv6s7g57k5v3z5vqwk3vpf7vpc2m1lvj8vp6rq1yyyxafk7x";
         };
         libName = "signal_belief_nexus";
         dependencies = [
@@ -1870,6 +1871,7 @@ rec {
             name = "translator";
             packageId = "translator";
             usesDefaultFeatures = false;
+            features = [ "unix" ];
           }
         ];
         features = {
