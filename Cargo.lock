@@ -313,8 +313,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-belief-nexus"
-version = "0.5.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=9672f7f#9672f7f9a771f1907485c1de274b82c719615c54"
+version = "0.6.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=a624c14#a624c14995c867ef4ecd4e603b61effc2d730bfa"
 dependencies = [
  "datom-codec",
  "protos",
@@ -511,8 +511,8 @@ dependencies = [
 
 [[package]]
 name = "signal"
-version = "10.4.1"
-source = "git+https://github.com/LiGoldragon/signal?rev=d77169d#d77169d061d0d0d7913415257d0f1c1603260583"
+version = "11.0.0"
+source = "git+https://github.com/LiGoldragon/signal?rev=6d4eb74#6d4eb74a238ea4a6149bd12c42a8c06aec01b154"
 dependencies = [
  "datom-codec",
  "ethos-zero",
@@ -523,8 +523,8 @@ dependencies = [
 
 [[package]]
 name = "signal-belief-nexus"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/signal-belief-nexus?rev=c388b11#c388b112d14b6460d321158e63ae2894d6eaf72e"
+version = "0.4.1"
+source = "git+https://github.com/LiGoldragon/signal-belief-nexus?rev=a6d3bda#a6d3bda2406c67486c9395c9e9547b84d34407d1"
 dependencies = [
  "datom-codec",
  "protos",
@@ -641,8 +641,8 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "translator"
-version = "0.4.2"
-source = "git+https://github.com/LiGoldragon/translator?rev=27da70f#27da70fda647d78655d755477913a47267eb9c62"
+version = "0.5.0"
+source = "git+https://github.com/LiGoldragon/translator?rev=abc89b9#abc89b9cc7469a35700cb222ba31a8f5cb0745e6"
 dependencies = [
  "datom-codec",
  "libc",

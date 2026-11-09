@@ -1112,13 +1112,13 @@ rec {
       };
       "meta-signal-belief-nexus" = rec {
         crateName = "meta-signal-belief-nexus";
-        version = "0.5.1";
+        version = "0.6.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-belief-nexus";
-          rev = "9672f7f9a771f1907485c1de274b82c719615c54";
-          sha256 = "07rnabs6q6nnw4i3wfhkgch5j4997g60yj293b4n8m59lqigcxgz";
+          rev = "a624c14995c867ef4ecd4e603b61effc2d730bfa";
+          sha256 = "1k0vmab89jygsgv1cp9jygd9q6bg26wj7waas4xkxki8nwlr1apv";
         };
         libName = "meta_signal_belief_nexus";
         dependencies = [
@@ -1791,14 +1791,14 @@ rec {
       };
       "signal" = rec {
         crateName = "signal";
-        version = "10.4.1";
+        version = "11.0.0";
         edition = "2024";
         links = "signal";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal";
-          rev = "d77169d061d0d0d7913415257d0f1c1603260583";
-          sha256 = "1rmh26a9qp0j80r5d733kw9s6gfdj6sd8y14vhphqfpvssa079ah";
+          rev = "6d4eb74a238ea4a6149bd12c42a8c06aec01b154";
+          sha256 = "0hqy8k58s6sc9wz76k8iq40bv636js5s951zgd01ncrxcy6h776a";
         };
         dependencies = [
           {
@@ -1830,19 +1830,18 @@ rec {
         ];
         features = {
           "datom" = [ "dep:datom-codec" "dep:protos" ];
-          "transport" = [ "dep:tokio" ];
         };
         resolvedDefaultFeatures = [ "datom" ];
       };
       "signal-belief-nexus" = rec {
         crateName = "signal-belief-nexus";
-        version = "0.4.0";
+        version = "0.4.1";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-belief-nexus";
-          rev = "c388b112d14b6460d321158e63ae2894d6eaf72e";
-          sha256 = "1r0q7zyggk1j1h480v2ncpxbyfgwr8g1xswdqmv158y347i1f609";
+          rev = "a6d3bda2406c67486c9395c9e9547b84d34407d1";
+          sha256 = "1gdhn0ccwryb0scv8f4f7rsr1bcazicz7q30xpv1rp30q5cqpv41";
         };
         libName = "signal_belief_nexus";
         dependencies = [
@@ -2163,13 +2162,13 @@ rec {
       };
       "translator" = rec {
         crateName = "translator";
-        version = "0.4.2";
+        version = "0.5.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/translator";
-          rev = "27da70fda647d78655d755477913a47267eb9c62";
-          sha256 = "0xs4ni7zskajcfbmszdxqqkwjymnsvvdydx2higrdgwlyq6pk3sc";
+          rev = "abc89b9cc7469a35700cb222ba31a8f5cb0745e6";
+          sha256 = "1907l121f2i6qvfimxn5n2vp2wbhsb3rwfwm82x2x0vlfyfdgp1z";
         };
         dependencies = [
           {

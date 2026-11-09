@@ -86,14 +86,27 @@ fn same_owner(first: &wire::Owner, second: &wire::Owner) -> bool {
     first == second
 }
 
+fn setting_address(set: &meta::Set) -> meta::SettingAddress {
+    let setting_key_option = match set {
+        meta::Set::HarnessLayout(value) => Some(meta::SettingKey::Harness(value.harness.clone())),
+        meta::Set::PlacementDefault(value) => Some(meta::SettingKey::Kind(value.kind.clone())),
+        _ => None,
+    };
+    meta::SettingAddress { setting_name: setting_name(set), setting_key_option }
+}
+
+fn unkeyed_addresses(names: Vec<meta::SettingName>) -> Vec<meta::SettingAddress> {
+    names.into_iter().map(|setting_name| meta::SettingAddress { setting_name, setting_key_option: None }).collect()
+}
+
 fn setting_name(set: &meta::Set) -> meta::SettingName {
     match set {
         meta::Set::RepositoryPolling(_) => meta::SettingName::RepositoryPolling,
         meta::Set::SubscriberCapacity(_) => meta::SettingName::SubscriberCapacity,
         meta::Set::OrdinaryPeers(_) => meta::SettingName::OrdinaryPeers,
         meta::Set::MetaPeers(_) => meta::SettingName::MetaPeers,
-        meta::Set::HarnessLayout(value) => meta::SettingName::LayoutOfHarness(value.harness.clone()),
-        meta::Set::PlacementDefault(value) => meta::SettingName::PlacementOfKind(value.kind.clone()),
+        meta::Set::HarnessLayout(_) => meta::SettingName::HarnessLayouts,
+        meta::Set::PlacementDefault(_) => meta::SettingName::PlacementDefaults,
         meta::Set::GenerationRetention(_) => meta::SettingName::GenerationRetention,
         meta::Set::NexusFrameCapacity(_) => meta::SettingName::NexusFrameCapacity,
         meta::Set::NexusTransportTimeout(_) => meta::SettingName::NexusTransportTimeout,
@@ -2554,7 +2567,7 @@ impl Configuration {
         meta::TranslatorConfiguration {
             configuration_revision: self.revision,
             set_vector: self.translator_sets.clone(),
-            readiness: if missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(missing) },
+            readiness: if missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(unkeyed_addresses(missing)) },
         }
     }
 
@@ -2563,7 +2576,7 @@ impl Configuration {
         if missing.is_empty() {
             meta::Readiness::Ready
         } else {
-            meta::Readiness::Awaiting(missing)
+            meta::Readiness::Awaiting(unkeyed_addresses(missing))
         }
     }
 
@@ -2828,7 +2841,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Invalid(
                 meta::Invalid {
                     keeper: meta::Keeper::Nexus,
-                    setting_name: setting_name(&set),
+                    setting_address: setting_address(&set),
                     string: message.into(),
                 },
             ));
@@ -2864,8 +2877,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             meta::Set::NexusFrameCapacity(value) => self.memory.configuration.nexus_frame_capacity = Some(*value),
             meta::Set::NexusTransportTimeout(value) => self.memory.configuration.nexus_transport_timeout = Some(*value),
             _ if setting_owner(&set) == meta::Keeper::Translator => {
-                let name = setting_name(&set);
-                self.memory.configuration.translator_sets.retain(|current| setting_name(current) != name);
+                let name = setting_address(&set);
+                self.memory.configuration.translator_sets.retain(|current| setting_address(current) != name);
                 self.memory.configuration.translator_sets.push(set.clone());
             }
             _ => unreachable!("all Nexus-owned settings are handled above"),

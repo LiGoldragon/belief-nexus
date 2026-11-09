@@ -149,6 +149,10 @@ pub struct TranslatorConfiguration {
     snapshot_ready: bool,
 }
 
+fn unkeyed_addresses(names: Vec<meta::SettingName>) -> Vec<meta::SettingAddress> {
+    names.into_iter().map(|setting_name| meta::SettingAddress { setting_name, setting_key_option: None }).collect()
+}
+
 fn translator_set_missing(sets: &[meta::Set]) -> Vec<meta::SettingName> {
     let required = [meta::SettingName::NexusSocket, meta::SettingName::MetaNexusSocket, meta::SettingName::CallTimeout, meta::SettingName::OutputLimit, meta::SettingName::TextBudget, meta::SettingName::TranslatorFrameCapacity, meta::SettingName::TranslatorTransportTimeout, meta::SettingName::AllowedNexusPeers, meta::SettingName::GitExecutable];
     required.into_iter().filter(|name| !sets.iter().any(|set| setting_name_for_translator(set) == *name)).collect()
@@ -197,7 +201,7 @@ impl TranslatorConfiguration {
         }
         configuration.revision = Some(snapshot.configuration_revision);
         configuration.snapshot_ready = matches!(snapshot.readiness, meta::Readiness::Ready);
-        let derived = if configuration.missing().is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(configuration.missing()) };
+        let derived = if configuration.missing().is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(unkeyed_addresses(configuration.missing())) };
         if derived != snapshot.readiness {
             return Err(TranslatorError::Configuration("translator readiness is not derived from its settings".into()));
         }
@@ -221,7 +225,7 @@ impl TranslatorConfiguration {
         }
         candidate.revision = Some(snapshot.configuration_revision);
         let stored_missing = translator_set_missing(&snapshot.set_vector);
-        let derived = if stored_missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(stored_missing) };
+        let derived = if stored_missing.is_empty() { meta::Readiness::Ready } else { meta::Readiness::Awaiting(unkeyed_addresses(stored_missing)) };
         if derived != snapshot.readiness { return Err(TranslatorError::Configuration("translator readiness is not derived from its stored settings".into())); }
         candidate.snapshot_ready = matches!(snapshot.readiness, meta::Readiness::Ready);
         *self = candidate;
@@ -621,7 +625,7 @@ mod tests {
             set: meta::Set::RepositoryPolling(meta::Timeout(250)),
             keeper: meta::Keeper::Nexus,
             configuration_revision: meta::ConfigurationRevision(8),
-            readiness: meta::Readiness::Awaiting(vec![meta::SettingName::RepositoryPolling]),
+            readiness: meta::Readiness::Awaiting(unkeyed_addresses(vec![meta::SettingName::RepositoryPolling])),
         }).unwrap();
         assert_eq!(nexus_owned.revision(), Some(&meta::ConfigurationRevision(8)));
         assert_eq!(nexus_owned.ordinary_nexus_socket(), Some("ordinary"));
