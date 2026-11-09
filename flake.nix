@@ -141,7 +141,7 @@
           {
             emission-generated = pkgs.runCommand "belief-emission-generated" {
             generator = ethos-zero.packages.${pkgs.stdenv.hostPlatform.system}.default;
-            declaration = ./emission.ethos;
+            declaration = ./crates/emission/emission.ethos;
             committed = ./crates/emission/src/lib.rs;
           } ''
             temporary="$(${pkgs.coreutils}/bin/mktemp -d)"

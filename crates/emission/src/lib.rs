@@ -294,7 +294,7 @@ pub enum Response {
     CleanupRefused(signal_belief_nexus::FileFailure),
     EmissionRefused(EmissionRefusal),
 }
-pub const ETHOS: &str = include_str!("../../../emission.ethos");
+pub const ETHOS: &str = include_str!("../emission.ethos");
 
 impl signal::Contracted for Query {
     const CONTRACT_SOURCE: &'static str = ETHOS;
