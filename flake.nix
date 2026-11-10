@@ -23,20 +23,22 @@
       # Every feature of a member on, as `cargo build --all-features` builds it.
       allFeatures =
         workspace: packageId: lib.attrNames (workspace.internal.crates.${packageId}.features or { });
+      # Its crates are the base's, under the feature set name this build takes.
       withAllFeatures =
-        { workspace, buildRustCrateForPkgs, crateOverrides }:
+        { workspace, buildRustCrateForPkgsFor }:
         name:
         let
           packageId = workspace.workspaceMembers.${name}.packageId;
+          features = allFeatures workspace packageId;
         in
         (workspace.internal.builtRustCratesWithFeatures {
-          inherit packageId;
-          features = allFeatures workspace packageId;
+          inherit packageId features;
           runTests = false;
-          buildRustCrateForPkgsFunc =
-            p: (buildRustCrateForPkgs p).override { defaultCrateOverrides = crateOverrides; };
-        }).crates.${packageId}.override
-          { inherit crateOverrides; };
+          buildRustCrateForPkgsFunc = buildRustCrateForPkgsFor {
+            inherit packageId features;
+            runTests = false;
+          };
+        }).crates.${packageId};
       workspaces = lib.genAttrs base.lib.systems (
         system:
         let
@@ -46,8 +48,7 @@
           workspace = composed.workspace;
           member = withAllFeatures {
             inherit workspace;
-            inherit (composed) buildRustCrateForPkgs;
-            inherit (context) crateOverrides;
+            inherit (composed) buildRustCrateForPkgsFor;
           };
           daemon = member "belief-nexus-daemon";
           translatorBuild = member "belief-nexus-translator";
