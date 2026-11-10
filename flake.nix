@@ -25,20 +25,8 @@
         workspace: packageId: lib.attrNames (workspace.internal.crates.${packageId}.features or { });
       # Its crates are the base's, under the feature set name this build takes.
       withAllFeatures =
-        { workspace, buildRustCrateForPkgsFor }:
-        name:
-        let
-          packageId = workspace.workspaceMembers.${name}.packageId;
-          features = allFeatures workspace packageId;
-        in
-        (workspace.internal.builtRustCratesWithFeatures {
-          inherit packageId features;
-          runTests = false;
-          buildRustCrateForPkgsFunc = buildRustCrateForPkgsFor {
-            inherit packageId features;
-            runTests = false;
-          };
-        }).crates.${packageId};
+        { workspace, binaries }:
+        name: binaries name (allFeatures workspace workspace.workspaceMembers.${name}.packageId);
       workspaces = lib.genAttrs base.lib.systems (
         system:
         let
@@ -48,7 +36,7 @@
           workspace = composed.workspace;
           member = withAllFeatures {
             inherit workspace;
-            inherit (composed) buildRustCrateForPkgsFor;
+            inherit (composed) binaries;
           };
           daemon = member "belief-nexus-daemon";
           translatorBuild = member "belief-nexus-translator";
