@@ -22,7 +22,7 @@ use meta_signal_belief_nexus as meta;
 use nexus_exchange::SocketPaths;
 use nexus_querying::Patience;
 use shared_translator::placement::Place;
-use shared_translator::{Caller, PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
+use shared_translator::{Caller, ProcessId, UserId};
 use signal::FrameCapacity;
 use signal_belief_nexus as public;
 use translator_serving::{
@@ -32,9 +32,6 @@ use translator_serving::{
 
 use crate::configuration::{keeper, TranslatorConfiguration};
 use crate::emission::Attempting;
-
-/// The peer name the deployment binds the paired Nexus under.
-const PAIRED_NEXUS_PEER: &str = "belief-nexus";
 
 /// How often the Nexus's meta socket is tried again while it is not yet
 /// answering at start, within the admission deadline.
@@ -172,13 +169,13 @@ impl BeliefTranslator {
     }
 
     /// Applies the deployment: the settings the place starts with, then the
-    /// paired Nexus's sockets and its peer, each a Configure conditional on
+    /// paired Nexus's sockets, each a Configure conditional on
     /// the revision before it, from revision 0. The first the Nexus already
     /// holds a later revision for ends it: the Nexus was configured before.
     /// The translator's settings are first restored from the Nexus, tried
     /// again while its meta socket is not yet answering, within the
     /// admission deadline. The meta lane waits until this is done.
-    pub fn deploy(&self, mut sets: Vec<meta::Set>, nexus: &PeerIdentity) -> Result<(), TranslatorError> {
+    pub fn deploy(&self, mut sets: Vec<meta::Set>) -> Result<(), TranslatorError> {
         let deadline = Instant::now() + self.shared.admission.deadline;
         loop {
             match self.restore() {
@@ -191,10 +188,6 @@ impl BeliefTranslator {
         sets.extend([
             meta::Set::NexusSocket(meta::SocketPath(paths.public.to_string_lossy().into_owned())),
             meta::Set::MetaNexusSocket(meta::SocketPath(paths.meta.to_string_lossy().into_owned())),
-            meta::Set::AllowedNexusPeers(public::PeerList(vec![PeerBinding {
-                peer_id: PeerId(PAIRED_NEXUS_PEER.into()),
-                peer_identity: nexus.clone(),
-            }])),
         ]);
         for (revision, set) in sets.into_iter().enumerate() {
             let revision = i64::try_from(revision)

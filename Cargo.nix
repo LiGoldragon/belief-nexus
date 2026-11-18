@@ -133,7 +133,7 @@ rec {
       };
       "belief-nexus-core" = rec {
         crateName = "belief-nexus-core";
-        version = "1.0.0";
+        version = "1.1.0";
         edition = "2021";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/core; };
         libName = "belief_nexus_core";
@@ -167,7 +167,7 @@ rec {
       };
       "belief-nexus-daemon" = rec {
         crateName = "belief-nexus-daemon";
-        version = "1.0.0";
+        version = "1.1.0";
         edition = "2021";
         crateBin = [
           {
@@ -264,7 +264,7 @@ rec {
       };
       "belief-nexus-translator" = rec {
         crateName = "belief-nexus-translator";
-        version = "1.0.0";
+        version = "1.1.0";
         edition = "2021";
         crateBin = [
           {
@@ -380,7 +380,7 @@ rec {
       };
       "belief-nexus-wire" = rec {
         crateName = "belief-nexus-wire";
-        version = "1.0.0";
+        version = "1.1.0";
         edition = "2021";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/wire; };
         libName = "belief_nexus_wire";
@@ -772,7 +772,7 @@ rec {
       };
       "emission-belief-nexus" = rec {
         crateName = "emission-belief-nexus";
-        version = "1.0.0";
+        version = "1.1.0";
         edition = "2021";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/emission; };
         libName = "emission_belief_nexus";
@@ -1589,13 +1589,13 @@ rec {
       };
       "meta-signal-belief-nexus" = rec {
         crateName = "meta-signal-belief-nexus";
-        version = "1.0.0";
+        version = "1.1.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-belief-nexus";
-          rev = "d85f795e64eecef44c7a91e3372528c98717a87e";
-          sha256 = "09d008s5lqi36jci0mv9s4aja23bskrlvrlwxcljpc2lcsk9vliz";
+          rev = "d983bc02f0c631807eeb62eb8c496deccff7f258";
+          sha256 = "0lwnh35fhnr3rl1c1i0limj9wrgi2pajjxqw4py6cm8y0ri1wxa6";
         };
         libName = "meta_signal_belief_nexus";
         dependencies = [

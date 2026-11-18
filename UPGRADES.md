@@ -1,5 +1,23 @@
 # Upgrades
 
+## 1.0.0 to 1.1.0 — AllowedNexusPeers leaves the settings; meta-signal-belief-nexus 1.1.0
+
+Every member moves to 1.1.0 together, on meta-signal-belief-nexus 1.1.0 at
+d983bc0 and build-base 6fe3a77, which registers it. 1.0.0 was never deployed,
+so the removal is a minor version.
+
+The emission lane admits its paired Nexus through the shared paired peer, so
+`AllowedNexusPeers` governed nothing and held that peer a second time. The
+translator no longer applies it after the deployment, the Nexus and the
+translator no longer keep it, and the readiness no longer awaits it: the
+translator's configuration is ready with its two sockets, `CallTimeout`,
+`OutputLimit`, `TextBudget`, `TranslatorFrameCapacity`,
+`TranslatorTransportTimeout` and `GitExecutable`. The deployment's twenty
+settings are unchanged; with the paired Nexus's two sockets after them, the
+first Configure of a place is answered at revision 23. The archived `Set`
+changes with the contract, so a 1.0.0 memory is not carried to 1.1.0; none was
+deployed.
+
 ## 0.2.0 to 1.0.0 — the shared Nexus layer 0.3.0: the exchange layer on every socket, the shared translator and pair launcher, a CLI takes its datom alone
 
 Every member moves to 1.0.0 together: the daemon, the translator, the CLIs and

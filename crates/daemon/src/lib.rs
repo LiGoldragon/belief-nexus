@@ -122,7 +122,6 @@ fn setting_name(set: &meta::Set) -> meta::SettingName {
         meta::Set::TextBudget(_) => meta::SettingName::TextBudget,
         meta::Set::TranslatorFrameCapacity(_) => meta::SettingName::TranslatorFrameCapacity,
         meta::Set::TranslatorTransportTimeout(_) => meta::SettingName::TranslatorTransportTimeout,
-        meta::Set::AllowedNexusPeers(_) => meta::SettingName::AllowedNexusPeers,
         meta::Set::GitExecutable(_) => meta::SettingName::GitExecutable,
     }
 }
@@ -131,7 +130,7 @@ fn setting_owner(set: &meta::Set) -> meta::Keeper {
     match set {
         meta::Set::NexusSocket(_) | meta::Set::MetaNexusSocket(_) | meta::Set::CallTimeout(_)
         | meta::Set::OutputLimit(_) | meta::Set::TextBudget(_) | meta::Set::TranslatorFrameCapacity(_)
-        | meta::Set::TranslatorTransportTimeout(_) | meta::Set::AllowedNexusPeers(_)
+        | meta::Set::TranslatorTransportTimeout(_)
         | meta::Set::GitExecutable(_) => meta::Keeper::Translator,
         _ => meta::Keeper::Nexus,
     }
@@ -419,7 +418,6 @@ mod tests {
                     meta::Set::TextBudget(meta::Budget { node_limit: meta::NodeLimit(1000), depth_limit: meta::DepthLimit(100) }),
                     meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1_000_000)),
                     meta::Set::TranslatorTransportTimeout(meta::Timeout(100)),
-                    meta::Set::AllowedNexusPeers(wire::PeerList(vec![peer.clone()])),
                     meta::Set::GitExecutable(wire::ExecutablePath("git".into())),
                 ],
             },
@@ -2555,7 +2553,7 @@ impl Configuration {
             meta::SettingName::NexusSocket, meta::SettingName::MetaNexusSocket,
             meta::SettingName::CallTimeout, meta::SettingName::OutputLimit,
             meta::SettingName::TextBudget, meta::SettingName::TranslatorFrameCapacity,
-            meta::SettingName::TranslatorTransportTimeout, meta::SettingName::AllowedNexusPeers,
+            meta::SettingName::TranslatorTransportTimeout,
             meta::SettingName::GitExecutable,
         ];
         required.into_iter().filter(|name| !self.translator_sets.iter().any(|set| &setting_name(set) == name)).collect()

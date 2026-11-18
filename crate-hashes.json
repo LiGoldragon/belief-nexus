@@ -2,7 +2,7 @@
   "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#0.33.1": "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d",
   "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#datom-codec-derive@0.32.3": "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d",
   "git+https://github.com/LiGoldragon/ethos-zero?rev=1976e45#22.0.0": "12b6np5n8knlpv2rb98g0m04n6xxaprd8n5hy4wgw658h5vg216j",
-  "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=d85f795e64eecef44c7a91e3372528c98717a87e#1.0.0": "09d008s5lqi36jci0mv9s4aja23bskrlvrlwxcljpc2lcsk9vliz",
+  "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=d983bc02f0c631807eeb62eb8c496deccff7f258#1.1.0": "0lwnh35fhnr3rl1c1i0limj9wrgi2pajjxqw4py6cm8y0ri1wxa6",
   "git+https://github.com/LiGoldragon/nexus?rev=a4bc0113c10c34ec9d92cde2d650eca9324144db#nexus-exchange@0.3.0": "0cp7b8w7jabk6hklliklaszmbjvkf84mkn4v946n9955bpqbac35",
   "git+https://github.com/LiGoldragon/nexus?rev=a4bc0113c10c34ec9d92cde2d650eca9324144db#nexus-querying@0.3.0": "0cp7b8w7jabk6hklliklaszmbjvkf84mkn4v946n9955bpqbac35",
   "git+https://github.com/LiGoldragon/nexus?rev=a4bc0113c10c34ec9d92cde2d650eca9324144db#nexus-serving@0.3.0": "0cp7b8w7jabk6hklliklaszmbjvkf84mkn4v946n9955bpqbac35",

@@ -209,7 +209,7 @@ fn ready_sets(ordinary_peers: Vec<translator::PeerBinding>) -> Vec<meta::Set> {
         meta::Set::RepositoryPolling(meta::Timeout(20)),
         meta::Set::SubscriberCapacity(2),
         meta::Set::OrdinaryPeers(wire::PeerList(ordinary_peers)),
-        meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
+        meta::Set::MetaPeers(wire::PeerList(vec![identity])),
         meta::Set::HarnessLayout(meta::HarnessLayout {
             harness: wire::Harness::Codex,
             layout: layout(".codex/config.toml", "model_instructions_file", "instructions.md", ".agents/skills"),
@@ -238,7 +238,6 @@ fn ready_sets(ordinary_peers: Vec<translator::PeerBinding>) -> Vec<meta::Set> {
         }),
         meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1_000_000)),
         meta::Set::TranslatorTransportTimeout(meta::Timeout(1_000)),
-        meta::Set::AllowedNexusPeers(wire::PeerList(vec![identity])),
         meta::Set::GitExecutable(wire::ExecutablePath("git".into())),
     ]
 }

@@ -26,7 +26,6 @@ pub struct TranslatorConfiguration {
     text_budget: Option<meta::Budget>,
     frame_capacity: Option<meta::ByteLimit>,
     transport_timeout: Option<meta::Timeout>,
-    allowed_nexus_peers: Option<public::PeerList>,
     git_executable: Option<public::ExecutablePath>,
     snapshot_ready: bool,
 }
@@ -50,7 +49,6 @@ fn translator_set_missing(sets: &[meta::Set]) -> Vec<meta::SettingName> {
         meta::SettingName::TextBudget,
         meta::SettingName::TranslatorFrameCapacity,
         meta::SettingName::TranslatorTransportTimeout,
-        meta::SettingName::AllowedNexusPeers,
         meta::SettingName::GitExecutable,
     ];
     required
@@ -68,7 +66,6 @@ fn setting_name_for_translator(set: &meta::Set) -> meta::SettingName {
         meta::Set::TextBudget(_) => meta::SettingName::TextBudget,
         meta::Set::TranslatorFrameCapacity(_) => meta::SettingName::TranslatorFrameCapacity,
         meta::Set::TranslatorTransportTimeout(_) => meta::SettingName::TranslatorTransportTimeout,
-        meta::Set::AllowedNexusPeers(_) => meta::SettingName::AllowedNexusPeers,
         meta::Set::GitExecutable(_) => meta::SettingName::GitExecutable,
         _ => meta::SettingName::RepositoryPolling,
     }
@@ -84,7 +81,6 @@ pub fn keeper(setting: &meta::Set) -> meta::Keeper {
         | meta::Set::TextBudget(_)
         | meta::Set::TranslatorFrameCapacity(_)
         | meta::Set::TranslatorTransportTimeout(_)
-        | meta::Set::AllowedNexusPeers(_)
         | meta::Set::GitExecutable(_) => meta::Keeper::Translator,
         _ => meta::Keeper::Nexus,
     }
@@ -219,9 +215,6 @@ impl TranslatorConfiguration {
             meta::Set::TranslatorTransportTimeout(value) if value.0 > 0 => {
                 self.transport_timeout = Some(value)
             }
-            meta::Set::AllowedNexusPeers(value) if !value.0.is_empty() => {
-                self.allowed_nexus_peers = Some(value)
-            }
             meta::Set::GitExecutable(value) if !value.0.is_empty() => {
                 self.git_executable = Some(value)
             }
@@ -252,9 +245,6 @@ impl TranslatorConfiguration {
         }
         if self.transport_timeout.is_none() {
             missing.push(meta::SettingName::TranslatorTransportTimeout);
-        }
-        if self.allowed_nexus_peers.is_none() {
-            missing.push(meta::SettingName::AllowedNexusPeers);
         }
         if self.git_executable.is_none() {
             missing.push(meta::SettingName::GitExecutable);
@@ -295,14 +285,7 @@ pub(crate) use tests::snapshot_for_test;
 mod tests {
     use super::*;
 
-    fn complete_snapshot(revision: i64, caller: &shared_translator::Caller) -> meta::TranslatorConfiguration {
-        let peer = shared_translator::PeerBinding {
-            peer_id: shared_translator::PeerId("nexus".into()),
-            peer_identity: shared_translator::PeerIdentity {
-                user_id: caller.user_id,
-                process_id: caller.process_id,
-            },
-        };
+    fn complete_snapshot(revision: i64) -> meta::TranslatorConfiguration {
         meta::TranslatorConfiguration {
             configuration_revision: meta::ConfigurationRevision(revision),
             set_vector: vec![
@@ -316,17 +299,9 @@ mod tests {
                 }),
                 meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1000)),
                 meta::Set::TranslatorTransportTimeout(meta::Timeout(100)),
-                meta::Set::AllowedNexusPeers(public::PeerList(vec![peer])),
                 meta::Set::GitExecutable(public::ExecutablePath("git".into())),
             ],
             readiness: meta::Readiness::Ready,
-        }
-    }
-
-    pub(crate) fn current_caller() -> shared_translator::Caller {
-        shared_translator::Caller {
-            user_id: shared_translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
-            process_id: shared_translator::ProcessId(i64::from(std::process::id())),
         }
     }
 
@@ -339,7 +314,6 @@ mod tests {
         assert_eq!(actual.text_budget, expected.text_budget);
         assert_eq!(actual.frame_capacity, expected.frame_capacity);
         assert_eq!(actual.transport_timeout, expected.transport_timeout);
-        assert_eq!(actual.allowed_nexus_peers, expected.allowed_nexus_peers);
         assert_eq!(actual.git_executable, expected.git_executable);
         assert_eq!(actual.snapshot_ready, expected.snapshot_ready);
     }
@@ -365,8 +339,7 @@ mod tests {
 
     #[test]
     fn a_revision_already_reflected_changes_nothing() {
-        let caller = current_caller();
-        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(8)).unwrap();
         let mut configuration = initial.clone();
         configuration
             .apply(&meta::ConfiguredState {
@@ -381,9 +354,8 @@ mod tests {
 
     #[test]
     fn configuration_refuses_exhausted_revision_without_mutation() {
-        let caller = current_caller();
         let mut configuration =
-            TranslatorConfiguration::from_snapshot(&complete_snapshot(i64::MAX, &caller)).unwrap();
+            TranslatorConfiguration::from_snapshot(&complete_snapshot(i64::MAX)).unwrap();
         let exhausted = meta::ConfiguredState {
             set: meta::Set::NexusSocket(meta::SocketPath("changed".into())),
             keeper: meta::Keeper::Translator,
@@ -399,8 +371,7 @@ mod tests {
 
     #[test]
     fn configured_keeper_must_own_its_setting_before_any_state_changes() {
-        let caller = current_caller();
-        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(7, &caller)).unwrap();
+        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(7)).unwrap();
         for mismatched in [
             meta::ConfiguredState {
                 set: meta::Set::NexusSocket(meta::SocketPath("changed".into())),
@@ -451,19 +422,18 @@ mod tests {
 
     #[test]
     fn snapshots_refuse_negative_revisions_before_construction_or_restore_mutation() {
-        let caller = current_caller();
         for invalid in [-1, i64::MIN] {
-            let mut snapshot = complete_snapshot(invalid, &caller);
+            let mut snapshot = complete_snapshot(invalid);
             snapshot.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("invalid".into()));
             assert!(TranslatorConfiguration::from_snapshot(&snapshot).is_err());
 
-            let mut current = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+            let mut current = TranslatorConfiguration::from_snapshot(&complete_snapshot(8)).unwrap();
             let before = current.clone();
             assert!(current.restore(&snapshot).is_err());
             assert_same_configuration(&current, &before);
         }
 
-        let zero = complete_snapshot(0, &caller);
+        let zero = complete_snapshot(0);
         assert_eq!(
             TranslatorConfiguration::from_snapshot(&zero).unwrap().revision(),
             Some(&meta::ConfigurationRevision(0))
@@ -476,23 +446,22 @@ mod tests {
 
     #[test]
     fn restore_refuses_stale_snapshots_and_reconciles_equal_or_newer_revisions() {
-        let caller = current_caller();
-        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(8, &caller)).unwrap();
+        let initial = TranslatorConfiguration::from_snapshot(&complete_snapshot(8)).unwrap();
 
-        let mut stale = complete_snapshot(7, &caller);
+        let mut stale = complete_snapshot(7);
         stale.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("stale".into()));
         let mut current = initial.clone();
         assert!(current.restore(&stale).is_err());
         assert_same_configuration(&current, &initial);
 
-        let mut equal = complete_snapshot(8, &caller);
+        let mut equal = complete_snapshot(8);
         equal.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("equal".into()));
         current.restore(&equal).unwrap();
         assert_eq!(current.revision(), Some(&meta::ConfigurationRevision(8)));
         assert_eq!(current.ordinary_nexus_socket(), Some("equal"));
         assert!(current.ready());
 
-        let mut newer = complete_snapshot(10, &caller);
+        let mut newer = complete_snapshot(10);
         newer.set_vector[0] = meta::Set::NexusSocket(meta::SocketPath("newer".into()));
         current.restore(&newer).unwrap();
         assert_eq!(current.revision(), Some(&meta::ConfigurationRevision(10)));
@@ -502,21 +471,20 @@ mod tests {
 
     #[test]
     fn snapshot_rejects_duplicate_nexus_owned_and_false_readiness() {
-        let caller = current_caller();
-        let mut duplicate = complete_snapshot(1, &caller);
+        let mut duplicate = complete_snapshot(1);
         duplicate.set_vector.push(meta::Set::CallTimeout(meta::Timeout(200)));
         assert!(TranslatorConfiguration::from_snapshot(&duplicate).is_err());
 
-        let mut nexus_owned = complete_snapshot(1, &caller);
+        let mut nexus_owned = complete_snapshot(1);
         nexus_owned.set_vector.push(meta::Set::RepositoryPolling(meta::Timeout(10)));
         assert!(TranslatorConfiguration::from_snapshot(&nexus_owned).is_err());
 
-        let mut false_readiness = complete_snapshot(1, &caller);
+        let mut false_readiness = complete_snapshot(1);
         false_readiness.set_vector.pop();
         assert!(TranslatorConfiguration::from_snapshot(&false_readiness).is_err());
     }
 
     pub(crate) fn snapshot_for_test(revision: i64) -> meta::TranslatorConfiguration {
-        complete_snapshot(revision, &current_caller())
+        complete_snapshot(revision)
     }
 }

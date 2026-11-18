@@ -3,8 +3,8 @@
 //! datom alone, their place read from `nexus/belief.datom` under the configuration home.
 //!
 //! The same Inputs are answered with the same Outputs: the deployment's twenty settings and the
-//! paired Nexus's three are applied first, so the first Configure of the place is answered at
-//! revision 24, Ready. A one-answer exchange prints its answer and ends; a Subscribe prints its
+//! paired Nexus's two sockets are applied first, so the first Configure of the place is answered
+//! at revision 23, Ready. A one-answer exchange prints its answer and ends; a Subscribe prints its
 //! Opened frame and then each Changed frame; a refused Subscribe prints its refusal and ends.
 //! The state survives a restart of the pair, whose deployment the Nexus already holds.
 
@@ -201,8 +201,8 @@ fn the_pair_answers_as_before_streams_its_frames_and_ends_a_refused_subscribe() 
 
     assert_eq!(
         tree.meta("Configure.{ None RepositoryPolling.211 }"),
-        configured(meta::Set::RepositoryPolling(meta::Timeout(211)), 24),
-        "the deployment's twenty settings and the paired Nexus's three come first"
+        configured(meta::Set::RepositoryPolling(meta::Timeout(211)), 23),
+        "the deployment's twenty settings and the paired Nexus's two sockets come first"
     );
     assert_eq!(
         tree.public("Resolve.[]"),

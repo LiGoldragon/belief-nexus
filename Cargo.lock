@@ -10,7 +10,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "belief-nexus-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "emission-belief-nexus",
  "meta-signal-belief-nexus",
@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "belief-nexus-daemon"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "belief-nexus-core",
  "belief-nexus-wire",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "belief-nexus-translator"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "belief-nexus-wire",
  "datom-codec",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "belief-nexus-wire"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "datom-codec",
  "meta-signal-belief-nexus",
@@ -201,7 +201,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "emission-belief-nexus"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "datom-codec",
  "meta-signal-belief-nexus",
@@ -454,8 +454,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-belief-nexus"
-version = "1.0.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=d85f795e64eecef44c7a91e3372528c98717a87e#d85f795e64eecef44c7a91e3372528c98717a87e"
+version = "1.1.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-belief-nexus?rev=d983bc02f0c631807eeb62eb8c496deccff7f258#d983bc02f0c631807eeb62eb8c496deccff7f258"
 dependencies = [
  "datom-codec",
  "protos",

@@ -14,9 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = TranslatorBootstrap::read_standard_input()?;
     let translator = BeliefTranslator::try_from(&bootstrap)?;
     let deploying = translator.clone();
-    let nexus = bootstrap.peer_identity.clone();
     std::thread::spawn(move || {
-        if let Err(error) = deploying.deploy(sets, &nexus) {
+        if let Err(error) = deploying.deploy(sets) {
             eprintln!("Belief Nexus translator deployment failed: {error}");
             std::process::exit(1);
         }
