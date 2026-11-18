@@ -1,5 +1,13 @@
 # Upgrades
 
+## 0.3.0 — 1.0.0 and 1.1.0 renumbered to the 0.x line; signal-belief-nexus 0.5.0, meta-signal-belief-nexus 0.7.0
+
+A breaking change on a 0.x crate takes the next minor, so every member published as 1.0.0 and
+1.1.0 is renumbered 0.3.0: the daemon, the translator and the wire, emission and core crates.
+The code is that of 1.1.0 (5faca3a); only the versions move, with the pins of the contracts,
+renumbered the same way: signal-belief-nexus 0.5.0 (e8acf79) and meta-signal-belief-nexus 0.7.0
+(fcca5ea), on build-base 3de51d2, which registers both. 1.0.0 and 1.1.0 were never deployed.
+
 ## 1.0.0 to 1.1.0 — AllowedNexusPeers leaves the settings; meta-signal-belief-nexus 1.1.0
 
 Every member moves to 1.1.0 together, on meta-signal-belief-nexus 1.1.0 at

@@ -13,8 +13,8 @@ edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "c8542d3ac380130190f3d2592b9c1c2f342e3ffa", default-features = false }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "d983bc02f0c631807eeb62eb8c496deccff7f258", default-features = false }
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "e8acf79eecb584296bc24fa56aa0044877080c57", default-features = false }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "fcca5ea0c7fccfc77e9dad0d2528830d88c92c08", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "4f5cbb9", default-features = false }
 nexus-exchange = { git = "https://github.com/LiGoldragon/nexus", rev = "a4bc0113c10c34ec9d92cde2d650eca9324144db", default-features = false }
 nexus-querying = { git = "https://github.com/LiGoldragon/nexus", rev = "a4bc0113c10c34ec9d92cde2d650eca9324144db", default-features = false }
