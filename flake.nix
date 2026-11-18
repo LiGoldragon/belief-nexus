@@ -50,22 +50,36 @@
           '';
           internal = pkgs.runCommand "belief-nexus-internal" { } ''
             mkdir -p "$out/libexec"
-            for executable in belief-nexus belief-nexus-meta belief-pair; do
-              cp ${translatorBuild}/bin/$executable "$out/libexec/$executable"
-            done
+            cp ${translatorBuild}/bin/belief-pair "$out/libexec/belief-pair"
           '';
+          # The settings a place starts with, which the translator applies
+          # through the Nexus at its first start: crates/translator/deployment.datom,
+          # its Git the one this flake builds with.
+          deployment = builtins.replaceStrings [ "@git@" ] [ "${pkgs.git}/bin/git" ] (
+            builtins.readFile ./crates/translator/deployment.datom
+          );
+          deployedTranslator = pkgs.writeShellScript "belief-translator-deployed" ''
+            exec ${translator}/bin/belief-translator ${lib.escapeShellArg deployment}
+          '';
+          # The pair launcher every translator shares: the place, the Nexus,
+          # the translator, the admission (frame deadline, frame capacity,
+          # retry delay) and the text budget the translator starts with.
           pair = pkgs.writeShellScriptBin "belief-pair" ''
             if [[ $# -ne 1 ]]; then echo "usage: belief-pair '<Place>'" >&2; exit 64; fi
             exec ${internal}/libexec/belief-pair "$1" \
-              "{ «${nexus}/bin/belief-nexus-daemon» «${translator}/bin/belief-translator» belief.sock belief-meta.sock belief-translator.sock belief-meta-translator.sock belief.memory { 8388608 70000 } Login.$(${pkgs.coreutils}/bin/id -u) [ RepositoryPolling.100 SubscriberCapacity.64 OrdinaryPeers.[] MetaPeers.[] Layout.{ Codex { .belief generations current .codex/config.toml model_instructions_file instructions.md .agents/skills } } Layout.{ Claude { .belief generations current CLAUDE.md unused-for-claude CLAUDE.md .claude/skills } } Placement.{ Spirit SystemPrompt } Placement.{ Intent SystemPrompt } Placement.{ Vision Skills } Placement.{ Knowledge Skills } Placement.{ Role Skills } GenerationRetention.KeepAll NexusFrameCapacity.8388608 NexusTransportTimeout.70000 CallTimeout.70000 OutputLimit.8388608 TextBudget.{ 100000 64 } TranslatorFrameCapacity.8388608 TranslatorTransportTimeout.70000 GitExecutable.«${pkgs.git}/bin/git» ] }"
+              ${nexus}/bin/belief-nexus-daemon \
+              ${deployedTranslator} \
+              70000 8388608 25 100000 64
           '';
-          cli = pkgs.writeShellScriptBin "belief-nexus" ''
-            if [[ $# -ne 2 ]]; then echo "usage: belief-nexus <metaflow> '<datom>'" >&2; exit 64; fi
-            exec ${internal}/libexec/belief-nexus "$1" "$2" belief-translator.sock
+          # Each CLI takes its datom alone; its place is the one
+          # nexus/belief.datom names under the configuration home.
+          cli = pkgs.runCommand "belief-nexus-cli" { } ''
+            mkdir -p "$out/bin"
+            cp ${translatorBuild}/bin/belief-nexus "$out/bin/belief-nexus"
           '';
-          meta-cli = pkgs.writeShellScriptBin "belief-nexus-meta" ''
-            if [[ $# -ne 2 ]]; then echo "usage: belief-nexus-meta <metaflow> '<datom>'" >&2; exit 64; fi
-            exec ${internal}/libexec/belief-nexus-meta "$1" "$2" belief-meta-translator.sock
+          meta-cli = pkgs.runCommand "belief-nexus-meta-cli" { } ''
+            mkdir -p "$out/bin"
+            cp ${translatorBuild}/bin/belief-nexus-meta "$out/bin/belief-nexus-meta"
           '';
           default = pkgs.symlinkJoin { name = "belief-nexus-v1"; paths = [ nexus translator pair cli meta-cli ]; };
         in
@@ -107,6 +121,21 @@
         extraChecks =
           { pkgs, workspace, doc, ... }:
           let
+          # A committed generation, which begins with what ethos-zero generates
+          # from its declaration.
+          generated =
+            name: declaration: committed:
+            pkgs.runCommand "belief-${name}-generated" {
+              generator = ethos-zero.packages.${pkgs.stdenv.hostPlatform.system}.default;
+              inherit declaration committed;
+            } ''
+              temporary="$(${pkgs.coreutils}/bin/mktemp -d)"
+              "$generator/bin/ethos-zero" "Generate.{ «$declaration» «$temporary» }"
+              generated="$(${pkgs.findutils}/bin/find "$temporary" -maxdepth 1 -name '*.rs' -print -quit)"
+              ${pkgs.coreutils}/bin/head -c "$(${pkgs.coreutils}/bin/stat -c %s "$generated")" "$committed" > "$temporary/committed-generated.rs"
+              ${pkgs.diffutils}/bin/cmp "$generated" "$temporary/committed-generated.rs"
+              touch "$out"
+            '';
           lintChecks = lib.listToAttrs (
             lib.concatMap (member: [
               { name = "doc-${member}"; value = doc member (allFeatures workspace workspace.workspaceMembers.${member}.packageId) [ "-D" "warnings" ]; }
@@ -114,18 +143,10 @@
           );
           in
           lintChecks // {
-            emission-generated = pkgs.runCommand "belief-emission-generated" {
-            generator = ethos-zero.packages.${pkgs.stdenv.hostPlatform.system}.default;
-            declaration = ./crates/emission/emission.ethos;
-            committed = ./crates/emission/src/lib.rs;
-          } ''
-            temporary="$(${pkgs.coreutils}/bin/mktemp -d)"
-            "$generator/bin/ethos-zero" "Generate.{ «$declaration» «$temporary» }"
-            generated="$(${pkgs.findutils}/bin/find "$temporary" -maxdepth 1 -name '*.rs' -print -quit)"
-            ${pkgs.coreutils}/bin/head -c "$(${pkgs.coreutils}/bin/stat -c %s "$generated")" "$committed" > "$temporary/committed-generated.rs"
-            ${pkgs.diffutils}/bin/cmp "$generated" "$temporary/committed-generated.rs"
-            touch "$out"
-          '';
+            emission-generated = generated "emission" ./crates/emission/emission.ethos ./crates/emission/src/lib.rs;
+            public-call-generated = generated "public-call" ./crates/wire/ethos/public-call.ethos ./crates/wire/src/generated/public_call.rs;
+            meta-call-generated = generated "meta-call" ./crates/wire/ethos/meta-call.ethos ./crates/wire/src/generated/meta_call.rs;
+            translator-generated = generated "translator" ./crates/translator/ethos/translator.ethos ./crates/translator/src/generated/translator.rs;
           };
       };
     in

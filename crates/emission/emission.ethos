@@ -2,7 +2,8 @@
 Signal
 [ :signal_belief_nexus:[ Harness ModuleName Placement Repository RepositoryState Workspace RelativePath
                           SourceRevision PublicationRevision GenerationId Diagnostic FileFailure ]
-  :meta_signal_belief_nexus:[ Layout RetentionPolicy ConfigurationRevision TranslatorConfiguration ] ] ; imports
+  :meta_signal_belief_nexus:[ Layout RetentionPolicy ConfigurationRevision TranslatorConfiguration ]
+  nexus_exchange:[ LaneFailure ] ]                    ; imports
 [ Snapshot.Repository                                 ; emissions: read one immutable main snapshot
   Publish.Publication                                 ;   or atomically replace one owned publication
   InspectPublication.InspectionRequest                ;   or observe owned recovery evidence
@@ -15,6 +16,8 @@ Signal
   EmissionRefused.EmissionRefusal ]
 [ EmissionAttempt.{ ConfigurationRevision TranslatorConfiguration Input } ; one immutable attempt snapshot
   EmissionAttemptOutcome.{ ConfigurationRevision Output } ; response revision equals its attempt
+  EmissionAnswer.[ Attempted.EmissionAttemptOutcome   ; what the emission lane answers: the attempt's outcome
+                   LaneFailed.LaneFailure ]           ;   or the lane's failure, apart from every outcome
   Content.String                                      ; types
   AbsolutePath.String
   ModuleSource.{ ModuleName RelativePath Option<Placement> Content }

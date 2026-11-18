@@ -20,6 +20,13 @@ pub struct EmissionAttemptOutcome {
     pub output: Output,
 }
 #[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub enum EmissionAnswer {
+    Attempted(EmissionAttemptOutcome),
+    LaneFailed(nexus_exchange::LaneFailure),
+}
+#[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Content(pub String);
@@ -347,6 +354,14 @@ pub const ETHOS: &str = include_str!("../emission.ethos");
 
 impl signal::Contracted for Input {
     const CONTRACT_SOURCE: &'static str = ETHOS;
+}
+
+/// An emission whose lane failed is answered by its own variant, apart from
+/// every outcome the translator observed doing the attempt.
+impl nexus_exchange::LaneFailing for EmissionAnswer {
+    fn lane_failed(lane_failure: nexus_exchange::LaneFailure) -> Self {
+        Self::LaneFailed(lane_failure)
+    }
 }
 
 use signal::{ByteViewable as _, Restorable as _, Signal, Signalizable as _};

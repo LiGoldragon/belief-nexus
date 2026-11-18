@@ -1,6 +1,7 @@
-//! The Belief Nexus's own wire: its call contracts, its bootstrap and its
-//! name. The exchange layer, the lanes and the admission they share are every
-//! Nexus's, in `nexus-exchange`.
+//! The Belief Nexus's own wire: its call contracts and its name. The exchange
+//! layer, the lanes and the admission they share are every Nexus's, in
+//! `nexus-exchange`, and the bootstrap a Nexus starts with is every Nexus's,
+//! in `nexus-serving`.
 //!
 //! The query of every exchange is a Call with its Caller: `public_call::Input`
 //! on the public socket and `meta_call::Input` on the meta socket, each
@@ -9,21 +10,20 @@
 //! check refuses a committed generation that differs from what the source
 //! generates.
 
-pub mod bootstrap;
 pub mod exchange;
+// A meta Call carries the meta query whole, beside a restore that carries
+// nothing: the generated enum is as large as its query.
+#[allow(clippy::large_enum_variant)]
 #[rustfmt::skip]
 #[path = "generated/meta_call.rs"]
 pub mod meta_call;
 #[rustfmt::skip]
 #[path = "generated/public_call.rs"]
 pub mod public_call;
-#[rustfmt::skip]
-#[path = "generated/transport.rs"]
-pub mod transport;
 
 pub use nexus_exchange::ValidAdmission;
 
-use nexus_exchange::{ComponentName, ComponentTitle, Named, SocketNaming};
+use nexus_exchange::{ComponentName, ComponentTitle, MemoryNaming, Named, SocketNaming};
 
 /// The Belief Nexus, which its sockets and its memory file are named after.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +47,6 @@ pub fn socket_names() -> nexus_exchange::SocketNames {
 }
 
 /// The Nexus's memory file in its place's state directory: `belief.memory`.
-pub fn memory_file_name() -> transport::MemoryFileName {
-    transport::MemoryFileName(format!("{}.memory", BeliefNexus::name().0))
+pub fn memory_file() -> nexus_exchange::MemoryFile {
+    BeliefNexus::name().memory_file()
 }

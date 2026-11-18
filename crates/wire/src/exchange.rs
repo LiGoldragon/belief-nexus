@@ -42,6 +42,6 @@ mod tests {
             names.meta_translator_socket.0,
             "belief-meta-translator.sock"
         );
-        assert_eq!(crate::memory_file_name().0, "belief.memory");
+        assert_eq!(crate::memory_file().0, "belief.memory");
     }
 }

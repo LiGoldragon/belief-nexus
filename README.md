@@ -21,17 +21,26 @@ Subscriptions open with current state and then receive changes; committed-main
 changes automatically refurnish affected workspaces, including module removal
 and restoration.
 
-The Nexus accepts binary Signal only. The paired translator owns datom text,
-Git snapshots, and filesystem publication. Public commands are:
+The Nexus accepts binary Signal only, on the exchange layer every Nexus
+shares (`nexus-serving`): each socket greets with its call contract's digest,
+and every exchange is answered once, or for a Subscribe with the frames of a
+`signal::Stream` (`Opened`, `Changed`, `Lagged`), and then ended. The paired
+translator, on the serving every translator shares (`translator-serving`),
+owns datom text, Git snapshots, and filesystem publication. Public commands
+are:
 
 ```sh
-belief-pair '{ <metaflow> «<runtime-directory>» «<state-directory>» }'
-belief-nexus <metaflow> '<ordinary datom>'
-belief-nexus-meta <metaflow> '<meta datom>'
+belief-pair '{ <place-name> «<runtime-directory>» «<state-directory>» }'
+belief-nexus '<ordinary datom>'
+belief-nexus-meta '<meta datom>'
 ```
 
-`belief-pair` takes exactly one typed `Place`. Its Nix package supplies typed
-deployment data and launches the paired Nexus and translator. Socket names are
+`belief-pair` takes exactly one typed `Place` and runs the pair launcher
+every translator shares; its Nix package supplies the Nexus, the translator
+with its deployment (`crates/translator/deployment.datom`), the admission and
+the text budget. Each CLI takes its datom alone: its place is the one
+`$XDG_CONFIG_HOME/nexus/belief.datom` (`~/.config/nexus/belief.datom`) names,
+`{ <place-name> }`, resolved under `$XDG_RUNTIME_DIR/nexus/`. Socket names are
 `belief.sock`, `belief-meta.sock`, `belief-translator.sock`, and
 `belief-meta-translator.sock`; Memory is `belief.memory` under State.
 
@@ -39,9 +48,11 @@ Text calls are owned by `Owner.Login(UserId)`, so separate CLI processes of the
 same login share repositories and workspaces. An authenticated direct signal
 peer is owned by its configured `Owner.Peer(PeerId)` after its declared Caller
 matches kernel-observed PID and UID. Meta calls require the paired translator
-transport and the deployment login UID. Configuration changes one field
+transport and the login the Nexus runs as. Configuration changes one field
 atomically: `None` is an authorized unconditional set; `Some(revision)` is
-compare-and-set. `Configured` returns the resulting coherent revision.
+compare-and-set. `Configured` returns the resulting coherent revision. At its
+first start the translator applies its deployment through the Nexus, from
+revision 0; a Nexus that already holds it is left as it is.
 
 `emission.ethos` temporarily uses a `Signal` root because Ethos Zero does not
 yet emit an `Emission` root; it declares only the Nexus-to-translator effect

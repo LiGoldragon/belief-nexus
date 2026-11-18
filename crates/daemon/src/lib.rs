@@ -9,7 +9,7 @@ use belief_nexus_core::{BeliefCore, PublicationContext, RecoveryOutcome, Resolve
 pub use belief_nexus_wire::meta_call::Call_Data as MetaCall;
 pub use belief_nexus_wire::public_call::Call_Data as PublicCall;
 use belief_nexus_wire::meta_call;
-use belief_nexus_wire::transport::NexusBootstrap;
+use nexus_serving::NexusBootstrap;
 use emission_belief_nexus as emission;
 use meta_signal_belief_nexus as meta;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -22,6 +22,7 @@ use std::{
     path::PathBuf,
 };
 
+pub mod bootstrap;
 pub mod memory_files;
 pub mod server;
 
@@ -370,8 +371,7 @@ mod tests {
                     user_id: translator::UserId(1000),
                     process_id: translator::ProcessId(44),
                 },
-                owner: wire::Owner::Login(translator::UserId(1000)),
-                memory_file_name: belief_nexus_wire::transport::MemoryFileName("memory".into()),
+                instance_id: nexus_serving::InstanceId("unit".into()),
             },
         }
     }
@@ -2394,7 +2394,7 @@ pub enum BootstrapError {
     InvalidAdmission,
     Memory(MemoryError),
     CorruptState,
-    Refused(belief_nexus_wire::bootstrap::BootstrapRefusal),
+    Refused(bootstrap::BootstrapRefusal),
     Preparation(String),
     MemoryFile(String),
 }
@@ -2407,15 +2407,16 @@ pub trait PreparesMemory {
 
 impl PreparesMemory for NexusBootstrap {
     fn prepared_memory(&self, effective_user: i64) -> Result<PathBuf, BootstrapError> {
-        use belief_nexus_wire::bootstrap::{Locating, Validating};
+        use bootstrap::Validating;
         use memory_files::{MemoryFileSelecting, MemoryFilesFromCurrent};
+        use nexus_exchange::MemoryPlacing;
         use translator::placement::{Held, ScopedPreparation};
         self.validated(effective_user).map_err(BootstrapError::Refused)?;
         validate_bootstrap(self)?;
-        let expected = self.memory_path();
+        let expected = self.place.memory_path::<belief_nexus_wire::BeliefNexus>();
         self.place
             .with_prepared_place(|prepared| {
-                let current = prepared.state().join(&self.memory_file_name.0);
+                let current = prepared.state().join(belief_nexus_wire::memory_file().0);
                 debug_assert_eq!(current, expected);
                 memory_files::MemoryFiles::from_current(current).select()
             })
@@ -2688,7 +2689,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     ) -> Result<Self, BootstrapError> {
         validate_bootstrap(&bootstrap.nexus)?;
         let loaded = store.load().map_err(BootstrapError::Memory)?;
-        let bootstrap_owner = bootstrap.nexus.owner.clone();
+        let bootstrap_owner = bootstrap::Owning::owner(&bootstrap.nexus);
         let memory = loaded.clone().unwrap_or_else(|| MemoryImage::empty(bootstrap_owner));
         if memory.next_event_sequence < 1 || memory.configuration.revision.0 < 0 {
             return Err(BootstrapError::CorruptState);

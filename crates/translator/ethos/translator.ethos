@@ -1,0 +1,5 @@
+Library
+[]                                                     ; imports
+[ ConfigurationFault.String ]                          ; types: why the translator's own settings cannot take a setting or a snapshot
+[]                                                     ; traits
+[]                                                     ; associations

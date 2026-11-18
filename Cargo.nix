@@ -73,6 +73,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "belief-nexus-wire" = rec {
+      packageId = "belief-nexus-wire";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "belief-nexus-wire";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "emission-belief-nexus" = rec {
       packageId = "emission-belief-nexus";
       build = internal.buildRustCrateWithFeatures {
@@ -123,7 +133,7 @@ rec {
       };
       "belief-nexus-core" = rec {
         crateName = "belief-nexus-core";
-        version = "0.2.0";
+        version = "1.0.0";
         edition = "2021";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/core; };
         libName = "belief_nexus_core";
@@ -135,6 +145,7 @@ rec {
           {
             name = "meta-signal-belief-nexus";
             packageId = "meta-signal-belief-nexus";
+            usesDefaultFeatures = false;
           }
           {
             name = "sha2";
@@ -143,17 +154,20 @@ rec {
           {
             name = "signal-belief-nexus";
             packageId = "signal-belief-nexus";
+            usesDefaultFeatures = false;
           }
           {
             name = "translator";
             packageId = "translator";
+            usesDefaultFeatures = false;
+            features = [ "unix" ];
           }
         ];
 
       };
       "belief-nexus-daemon" = rec {
         crateName = "belief-nexus-daemon";
-        version = "0.2.0";
+        version = "1.0.0";
         edition = "2021";
         crateBin = [
           {
@@ -170,17 +184,41 @@ rec {
             packageId = "belief-nexus-core";
           }
           {
+            name = "belief-nexus-wire";
+            packageId = "belief-nexus-wire";
+          }
+          {
             name = "emission-belief-nexus";
             packageId = "emission-belief-nexus";
           }
           {
+            name = "futures-util";
+            packageId = "futures-util";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "kameo";
+            packageId = "kameo";
+          }
+          {
             name = "meta-signal-belief-nexus";
             packageId = "meta-signal-belief-nexus";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "nexus-serving";
+            packageId = "nexus-serving";
+            usesDefaultFeatures = false;
           }
           {
             name = "nix";
             packageId = "nix";
-            features = [ "socket" "user" ];
+            features = [ "fs" "socket" "user" ];
           }
           {
             name = "rkyv";
@@ -196,17 +234,26 @@ rec {
           {
             name = "signal-belief-nexus";
             packageId = "signal-belief-nexus";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            features = [ "rt-multi-thread" "net" "io-util" "time" "sync" "macros" ];
           }
           {
             name = "translator";
             packageId = "translator";
+            usesDefaultFeatures = false;
             features = [ "unix" ];
           }
         ];
         devDependencies = [
           {
-            name = "belief-nexus-translator";
-            packageId = "belief-nexus-translator";
+            name = "nexus-querying";
+            packageId = "nexus-querying";
+            usesDefaultFeatures = false;
           }
           {
             name = "tempfile";
@@ -217,7 +264,7 @@ rec {
       };
       "belief-nexus-translator" = rec {
         crateName = "belief-nexus-translator";
-        version = "0.2.0";
+        version = "1.0.0";
         edition = "2021";
         crateBin = [
           {
@@ -245,6 +292,11 @@ rec {
         libName = "belief_nexus_translator";
         dependencies = [
           {
+            name = "belief-nexus-wire";
+            packageId = "belief-nexus-wire";
+            features = [ "datom" ];
+          }
+          {
             name = "datom-codec";
             packageId = "datom-codec";
           }
@@ -256,12 +308,24 @@ rec {
           {
             name = "meta-signal-belief-nexus";
             packageId = "meta-signal-belief-nexus";
+            usesDefaultFeatures = false;
             features = [ "datom" ];
+          }
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
+            usesDefaultFeatures = false;
+            features = [ "datom" ];
+          }
+          {
+            name = "nexus-querying";
+            packageId = "nexus-querying";
+            usesDefaultFeatures = false;
           }
           {
             name = "nix";
             packageId = "nix";
-            features = [ "socket" "user" "signal" "process" ];
+            features = [ "fs" "poll" "process" "signal" "socket" "user" ];
           }
           {
             name = "protos";
@@ -281,13 +345,27 @@ rec {
           {
             name = "signal-belief-nexus";
             packageId = "signal-belief-nexus";
+            usesDefaultFeatures = false;
             features = [ "datom" ];
           }
           {
             name = "translator";
             packageId = "translator";
             rename = "shared-translator";
-            features = [ "text" "unix" ];
+            usesDefaultFeatures = false;
+            features = [ "unix" "text" ];
+          }
+          {
+            name = "translator-client";
+            packageId = "translator-client";
+            usesDefaultFeatures = false;
+            features = [ "datom" ];
+          }
+          {
+            name = "translator-serving";
+            packageId = "translator-serving";
+            usesDefaultFeatures = false;
+            features = [ "text" ];
           }
         ];
         devDependencies = [
@@ -296,7 +374,65 @@ rec {
             packageId = "tempfile";
           }
         ];
-
+        features = {
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "belief-nexus-wire" = rec {
+        crateName = "belief-nexus-wire";
+        version = "1.0.0";
+        edition = "2021";
+        src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/wire; };
+        libName = "belief_nexus_wire";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "meta-signal-belief-nexus";
+            packageId = "meta-signal-belief-nexus";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "signal-belief-nexus";
+            packageId = "signal-belief-nexus";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "translator";
+            packageId = "translator";
+            rename = "shared-translator";
+            usesDefaultFeatures = false;
+            features = [ "unix" ];
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal-belief-nexus/datom" "meta-signal-belief-nexus/datom" "shared-translator/datom" "nexus-exchange/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "bitflags" = rec {
         crateName = "bitflags";
@@ -427,7 +563,7 @@ rec {
           "extra-platforms" = [ "dep:extra-platforms" ];
           "serde" = [ "dep:serde" ];
         };
-        resolvedDefaultFeatures = [ "std" ];
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "cfg-if" = rec {
         crateName = "cfg-if";
@@ -612,9 +748,31 @@ rec {
         };
         resolvedDefaultFeatures = [ "alloc" "block-buffer" "core-api" "default" "std" ];
       };
+      "downcast-rs" = rec {
+        crateName = "downcast-rs";
+        version = "2.0.2";
+        edition = "2021";
+        sha256 = "1g0crs9qgz0sd9cwdgmm0zvjin2v549v46xfnc859rk903v40whi";
+        libName = "downcast_rs";
+        features = {
+          "default" = [ "std" "sync" ];
+        };
+        resolvedDefaultFeatures = [ "default" "std" "sync" ];
+      };
+      "dyn-clone" = rec {
+        crateName = "dyn-clone";
+        version = "1.0.20";
+        edition = "2018";
+        sha256 = "0m956cxcg8v2n8kmz6xs5zl13k2fak3zkapzfzzp7pxih6hix26h";
+        libName = "dyn_clone";
+        authors = [
+          "David Tolnay <dtolnay@gmail.com>"
+        ];
+
+      };
       "emission-belief-nexus" = rec {
         crateName = "emission-belief-nexus";
-        version = "0.2.0";
+        version = "1.0.0";
         edition = "2021";
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/emission; };
         libName = "emission_belief_nexus";
@@ -627,6 +785,11 @@ rec {
           {
             name = "meta-signal-belief-nexus";
             packageId = "meta-signal-belief-nexus";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
             usesDefaultFeatures = false;
           }
           {
@@ -662,7 +825,7 @@ rec {
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" "signal-belief-nexus/datom" "meta-signal-belief-nexus/datom" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal-belief-nexus/datom" "meta-signal-belief-nexus/datom" "nexus-exchange/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
@@ -712,7 +875,7 @@ rec {
           "default" = [ "std" ];
           "std" = [ "libc/std" ];
         };
-        resolvedDefaultFeatures = [ "std" ];
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "ethos-zero" = rec {
         crateName = "ethos-zero";
@@ -782,6 +945,96 @@ rec {
         };
         resolvedDefaultFeatures = [ "alloc" "default" "std" ];
       };
+      "futures" = rec {
+        crateName = "futures";
+        version = "0.3.34";
+        edition = "2018";
+        sha256 = "18yhwmbdalhz2z9i1vm10hy2v0cfm82dkgcb6vr2msxazfix4ccs";
+        dependencies = [
+          {
+            name = "futures-channel";
+            packageId = "futures-channel";
+            usesDefaultFeatures = false;
+            features = [ "sink" ];
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-executor";
+            packageId = "futures-executor";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-sink";
+            packageId = "futures-sink";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-task";
+            packageId = "futures-task";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-util";
+            packageId = "futures-util";
+            usesDefaultFeatures = false;
+            features = [ "sink" ];
+          }
+        ];
+        features = {
+          "alloc" = [ "futures-core/alloc" "futures-task/alloc" "futures-sink/alloc" "futures-channel/alloc" "futures-util/alloc" ];
+          "async-await" = [ "futures-util/async-await" "futures-util/async-await-macro" ];
+          "bilock" = [ "futures-util/bilock" ];
+          "compat" = [ "std" "futures-util/compat" ];
+          "default" = [ "std" "async-await" "executor" ];
+          "executor" = [ "std" "futures-executor/std" ];
+          "futures-executor" = [ "dep:futures-executor" ];
+          "io-compat" = [ "compat" "futures-util/io-compat" ];
+          "spin" = [ "futures-util/spin" ];
+          "std" = [ "alloc" "futures-core/std" "futures-task/std" "futures-io/std" "futures-sink/std" "futures-util/std" "futures-util/io" "futures-util/channel" ];
+          "thread-pool" = [ "executor" "futures-executor/thread-pool" ];
+          "unstable" = [ "futures-core/unstable" "futures-task/unstable" "futures-channel/unstable" "futures-io/unstable" "futures-util/unstable" ];
+          "write-all-vectored" = [ "futures-util/write-all-vectored" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" "async-await" "default" "executor" "futures-executor" "std" ];
+      };
+      "futures-channel" = rec {
+        crateName = "futures-channel";
+        version = "0.3.34";
+        edition = "2018";
+        sha256 = "1i4kwcanpaphn1ax62ci3nx176kglxqx0gnhzqpqdr1rkpbf7ydi";
+        libName = "futures_channel";
+        dependencies = [
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-sink";
+            packageId = "futures-sink";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "alloc" = [ "futures-core/alloc" ];
+          "default" = [ "std" ];
+          "futures-sink" = [ "dep:futures-sink" ];
+          "sink" = [ "futures-sink" ];
+          "std" = [ "alloc" "futures-core/std" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" "futures-sink" "sink" "std" ];
+      };
       "futures-core" = rec {
         crateName = "futures-core";
         version = "0.3.34";
@@ -791,6 +1044,83 @@ rec {
         features = {
           "default" = [ "std" ];
           "portable-atomic" = [ "dep:portable-atomic" ];
+          "std" = [ "alloc" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" "std" ];
+      };
+      "futures-executor" = rec {
+        crateName = "futures-executor";
+        version = "0.3.34";
+        edition = "2018";
+        sha256 = "0cjl3y7jgg60wwb96ikxj23r6q91ylvx8v675yychv1w3b7lf6q3";
+        libName = "futures_executor";
+        dependencies = [
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-task";
+            packageId = "futures-task";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-util";
+            packageId = "futures-util";
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "default" = [ "std" ];
+          "std" = [ "futures-core/std" "futures-task/std" "futures-util/std" ];
+          "thread-pool" = [ "std" ];
+        };
+        resolvedDefaultFeatures = [ "std" ];
+      };
+      "futures-io" = rec {
+        crateName = "futures-io";
+        version = "0.3.34";
+        edition = "2018";
+        sha256 = "1v9z6wj92ra18kpv0xig21hgpzrvcwmcr8fszyzh64yyay0zmh2k";
+        libName = "futures_io";
+        features = {
+          "default" = [ "std" ];
+        };
+        resolvedDefaultFeatures = [ "std" ];
+      };
+      "futures-macro" = rec {
+        crateName = "futures-macro";
+        version = "0.3.34";
+        edition = "2018";
+        sha256 = "0i0czvcvsqq4hrccibq2f23004si5z34zjwdxfmqhlrmm15nbfcz";
+        procMacro = true;
+        libName = "futures_macro";
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.5";
+            features = [ "full" ];
+          }
+        ];
+
+      };
+      "futures-sink" = rec {
+        crateName = "futures-sink";
+        version = "0.3.34";
+        edition = "2018";
+        sha256 = "07cfvrgc3vxk6sw5g8a8dnrm1mzg6d5mwy08ywa1sgyhyxml4i0r";
+        libName = "futures_sink";
+        features = {
+          "default" = [ "std" ];
           "std" = [ "alloc" ];
         };
         resolvedDefaultFeatures = [ "alloc" "std" ];
@@ -815,14 +1145,45 @@ rec {
         libName = "futures_util";
         dependencies = [
           {
+            name = "futures-channel";
+            packageId = "futures-channel";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [ "std" ];
+          }
+          {
             name = "futures-core";
             packageId = "futures-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-io";
+            packageId = "futures-io";
+            optional = true;
+            usesDefaultFeatures = false;
+            features = [ "std" ];
+          }
+          {
+            name = "futures-macro";
+            packageId = "futures-macro";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "futures-sink";
+            packageId = "futures-sink";
+            optional = true;
             usesDefaultFeatures = false;
           }
           {
             name = "futures-task";
             packageId = "futures-task";
             usesDefaultFeatures = false;
+          }
+          {
+            name = "memchr";
+            packageId = "memchr";
+            optional = true;
           }
           {
             name = "pin-project-lite";
@@ -862,7 +1223,7 @@ rec {
           "unstable" = [ "futures-core/unstable" "futures-task/unstable" ];
           "write-all-vectored" = [ "io" ];
         };
-        resolvedDefaultFeatures = [ "alloc" "slab" "std" ];
+        resolvedDefaultFeatures = [ "alloc" "async-await" "async-await-macro" "channel" "futures-channel" "futures-io" "futures-macro" "futures-sink" "io" "memchr" "sink" "slab" "std" ];
       };
       "generic-array" = rec {
         crateName = "generic-array";
@@ -983,6 +1344,13 @@ rec {
           "serde" = [ "dep:serde_core" "dep:serde" ];
         };
       };
+      "heck" = rec {
+        crateName = "heck";
+        version = "0.5.0";
+        edition = "2021";
+        sha256 = "1sjmpsdl8czyh9ywl3qcsfsq9a307dg4ni2vnlwgnzzqhc4y0113";
+
+      };
       "indexmap" = rec {
         crateName = "indexmap";
         version = "2.14.2";
@@ -1044,6 +1412,91 @@ rec {
         };
         resolvedDefaultFeatures = [ "std" ];
       };
+      "kameo" = rec {
+        crateName = "kameo";
+        version = "0.22.2";
+        edition = "2024";
+        sha256 = "0am83imjgji4s4g4agk3x58b26z2m4b69vs35y0r016k7qrbgfkw";
+        dependencies = [
+          {
+            name = "downcast-rs";
+            packageId = "downcast-rs";
+          }
+          {
+            name = "dyn-clone";
+            packageId = "dyn-clone";
+          }
+          {
+            name = "futures";
+            packageId = "futures";
+          }
+          {
+            name = "kameo_macros";
+            packageId = "kameo_macros";
+            optional = true;
+          }
+          {
+            name = "serde";
+            packageId = "serde";
+            features = [ "derive" ];
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" "rt" "sync" "time" ];
+          }
+          {
+            name = "tracing";
+            packageId = "tracing";
+            optional = true;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" "rt" "rt-multi-thread" "signal" "sync" "time" ];
+          }
+        ];
+        features = {
+          "console" = [ "dep:rmp-serde" "tokio/net" "tokio/io-util" ];
+          "default" = [ "macros" "tracing" ];
+          "hotpath" = [ "dep:hotpath" "hotpath/hotpath" ];
+          "macros" = [ "dep:kameo_macros" ];
+          "metrics" = [ "dep:metrics" ];
+          "otel" = [ "dep:opentelemetry" "dep:tracing-opentelemetry" ];
+          "remote" = [ "dep:const-fnv1a-hash" "dep:const-str" "dep:either" "dep:libp2p" "dep:linkme" "dep:rmp-serde" ];
+          "tracing" = [ "dep:tracing" "tokio/tracing" ];
+        };
+        resolvedDefaultFeatures = [ "default" "macros" "tracing" ];
+      };
+      "kameo_macros" = rec {
+        crateName = "kameo_macros";
+        version = "0.21.1";
+        edition = "2024";
+        sha256 = "0miq3vvrbd0vq57x1vplqgbwb1frvbxs1bzvx3l6xf3fjxan0mpp";
+        procMacro = true;
+        dependencies = [
+          {
+            name = "heck";
+            packageId = "heck";
+          }
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "syn";
+            packageId = "syn 2.0.119";
+            features = [ "extra-traits" "full" ];
+          }
+        ];
+
+      };
       "libc" = rec {
         crateName = "libc";
         version = "0.2.189";
@@ -1073,6 +1526,30 @@ rec {
         };
         resolvedDefaultFeatures = [ "auxvec" "elf" "errno" "general" "ioctl" "no_std" "prctl" ];
       };
+      "log" = rec {
+        crateName = "log";
+        version = "0.4.34";
+        edition = "2021";
+        sha256 = "1ihkzn0m33ab79fcl4mkb04n5iwqzbxzyw7l7hazqkffaqzbvy7r";
+        authors = [
+          "The Rust Project Developers"
+        ];
+        features = {
+          "kv_serde" = [ "kv_std" "value-bag/serde" "serde" ];
+          "kv_std" = [ "std" "kv" "value-bag/error" ];
+          "kv_sval" = [ "kv" "value-bag/sval" "sval" "sval_ref" ];
+          "kv_unstable" = [ "kv" "value-bag" ];
+          "kv_unstable_serde" = [ "kv_serde" "kv_unstable_std" ];
+          "kv_unstable_std" = [ "kv_std" "kv_unstable" ];
+          "kv_unstable_sval" = [ "kv_sval" "kv_unstable" ];
+          "serde" = [ "serde_core" ];
+          "serde_core" = [ "dep:serde_core" ];
+          "std" = [ "alloc" ];
+          "sval" = [ "dep:sval" ];
+          "sval_ref" = [ "dep:sval_ref" ];
+          "value-bag" = [ "dep:value-bag" ];
+        };
+      };
       "memchr" = rec {
         crateName = "memchr";
         version = "2.8.3";
@@ -1090,7 +1567,7 @@ rec {
           "std" = [ "alloc" ];
           "use_std" = [ "std" ];
         };
-        resolvedDefaultFeatures = [ "alloc" "std" ];
+        resolvedDefaultFeatures = [ "alloc" "default" "std" ];
       };
       "memoffset" = rec {
         crateName = "memoffset";
@@ -1112,13 +1589,13 @@ rec {
       };
       "meta-signal-belief-nexus" = rec {
         crateName = "meta-signal-belief-nexus";
-        version = "0.6.1";
+        version = "1.0.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-belief-nexus";
-          rev = "eb43351e8ad155b555842a8ab7e9e46eaf8bf97f";
-          sha256 = "0amw5gi93ncfq5chlcsbfhfxm082lglad42l94vnvw36sbrv8zmn";
+          rev = "d85f795e64eecef44c7a91e3372528c98717a87e";
+          sha256 = "09d008s5lqi36jci0mv9s4aja23bskrlvrlwxcljpc2lcsk9vliz";
         };
         libName = "meta_signal_belief_nexus";
         dependencies = [
@@ -1158,7 +1635,47 @@ rec {
         features = {
           "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" "signal-belief-nexus/datom" "translator/datom" ];
         };
-        resolvedDefaultFeatures = [ "datom" "default" ];
+        resolvedDefaultFeatures = [ "datom" ];
+      };
+      "mio" = rec {
+        crateName = "mio";
+        version = "1.2.3";
+        edition = "2021";
+        sha256 = "1n5ryp7j5fga38z7php5yy9k7ia24rp6cl9gm27zwar6khz4862b";
+        authors = [
+          "Carl Lerche <me@carllerche.com>"
+          "Thomas de Zeeuw <thomasdezeeuw@gmail.com>"
+          "Tokio Contributors <team@tokio.rs>"
+        ];
+        dependencies = [
+          {
+            name = "libc";
+            packageId = "libc";
+            target = { target, features }: ((target."unix" or false) || ("hermit" == target."os" or null) || ("wasi" == target."os" or null));
+          }
+          {
+            name = "log";
+            packageId = "log";
+            optional = true;
+          }
+          {
+            name = "wasi";
+            packageId = "wasi";
+            target = { target, features }: ("wasi" == target."os" or null);
+          }
+          {
+            name = "windows-sys";
+            packageId = "windows-sys";
+            target = { target, features }: (target."windows" or false);
+            features = [ "Wdk_Foundation" "Wdk_Storage_FileSystem" "Wdk_System_IO" "Win32_Foundation" "Win32_Networking_WinSock" "Win32_Storage_FileSystem" "Win32_Security" "Win32_System_IO" "Win32_System_WindowsProgramming" ];
+          }
+        ];
+        features = {
+          "default" = [ "log" ];
+          "log" = [ "dep:log" ];
+          "os-ext" = [ "os-poll" "windows-sys/Win32_System_Pipes" "windows-sys/Win32_Security" ];
+        };
+        resolvedDefaultFeatures = [ "default" "log" "net" "os-ext" "os-poll" ];
       };
       "munge" = rec {
         crateName = "munge";
@@ -1205,6 +1722,152 @@ rec {
           }
         ];
 
+      };
+      "nexus-exchange" = rec {
+        crateName = "nexus-exchange";
+        version = "0.3.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/nexus";
+          rev = "a4bc0113c10c34ec9d92cde2d650eca9324144db";
+          sha256 = "0cp7b8w7jabk6hklliklaszmbjvkf84mkn4v946n9955bpqbac35";
+        };
+        libName = "nexus_exchange";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "translator";
+            packageId = "translator";
+            rename = "shared-translator";
+            usesDefaultFeatures = false;
+            features = [ "unix" ];
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" "shared-translator/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "default" ];
+      };
+      "nexus-querying" = rec {
+        crateName = "nexus-querying";
+        version = "0.3.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/nexus";
+          rev = "a4bc0113c10c34ec9d92cde2d650eca9324144db";
+          sha256 = "0cp7b8w7jabk6hklliklaszmbjvkf84mkn4v946n9955bpqbac35";
+        };
+        libName = "nexus_querying";
+        dependencies = [
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+        ];
+
+      };
+      "nexus-serving" = rec {
+        crateName = "nexus-serving";
+        version = "0.3.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/nexus";
+          rev = "a4bc0113c10c34ec9d92cde2d650eca9324144db";
+          sha256 = "0cp7b8w7jabk6hklliklaszmbjvkf84mkn4v946n9955bpqbac35";
+        };
+        libName = "nexus_serving";
+        dependencies = [
+          {
+            name = "futures-channel";
+            packageId = "futures-channel";
+            usesDefaultFeatures = false;
+            features = [ "sink" ];
+          }
+          {
+            name = "futures-util";
+            packageId = "futures-util";
+            usesDefaultFeatures = false;
+            features = [ "std" "async-await-macro" "channel" "io" "sink" ];
+          }
+          {
+            name = "mio";
+            packageId = "mio";
+            features = [ "log" ];
+          }
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            features = [ "rt" "net" "io-util" "time" "sync" "macros" "signal" "tracing" ];
+          }
+          {
+            name = "translator";
+            packageId = "translator";
+            rename = "shared-translator";
+            usesDefaultFeatures = false;
+            features = [ "unix" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            features = [ "rt-multi-thread" "net" "io-util" "time" "sync" "macros" ];
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "nexus-exchange/datom" ];
+        };
       };
       "nix" = rec {
         crateName = "nix";
@@ -1257,7 +1920,7 @@ rec {
           "user" = [ "feature" ];
           "zerocopy" = [ "fs" "uio" ];
         };
-        resolvedDefaultFeatures = [ "default" "feature" "memoffset" "poll" "process" "signal" "socket" "user" ];
+        resolvedDefaultFeatures = [ "default" "feature" "fs" "memoffset" "poll" "process" "signal" "socket" "user" ];
       };
       "once_cell" = rec {
         crateName = "once_cell";
@@ -1276,7 +1939,7 @@ rec {
           "portable-atomic" = [ "dep:portable-atomic" ];
           "std" = [ "alloc" ];
         };
-        resolvedDefaultFeatures = [ "alloc" "race" "std" ];
+        resolvedDefaultFeatures = [ "alloc" "default" "race" "std" ];
       };
       "pin-project-lite" = rec {
         crateName = "pin-project-lite";
@@ -1736,7 +2399,7 @@ rec {
           "thread" = [ "linux-raw-sys/prctl" ];
           "use-libc" = [ "libc_errno" "libc" ];
         };
-        resolvedDefaultFeatures = [ "alloc" "default" "fs" "process" "std" ];
+        resolvedDefaultFeatures = [ "alloc" "default" "fs" "process" "rand" "std" ];
       };
       "rustversion" = rec {
         crateName = "rustversion";
@@ -1749,6 +2412,100 @@ rec {
           "David Tolnay <dtolnay@gmail.com>"
         ];
 
+      };
+      "serde" = rec {
+        crateName = "serde";
+        version = "1.0.229";
+        edition = "2021";
+        sha256 = "1fp04fq4a79bpm61xz1zy0pbz4kpc7d771zii1k3inmszq55jj21";
+        authors = [
+          "Erick Tryzelaar <erick.tryzelaar@gmail.com>"
+          "David Tolnay <dtolnay@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "serde_core";
+            packageId = "serde_core";
+            usesDefaultFeatures = false;
+            features = [ "result" ];
+          }
+          {
+            name = "serde_derive";
+            packageId = "serde_derive";
+            optional = true;
+          }
+        ];
+        features = {
+          "alloc" = [ "serde_core/alloc" ];
+          "default" = [ "std" ];
+          "derive" = [ "serde_derive" ];
+          "rc" = [ "serde_core/rc" ];
+          "serde_derive" = [ "dep:serde_derive" ];
+          "std" = [ "serde_core/std" ];
+          "unstable" = [ "serde_core/unstable" ];
+        };
+        resolvedDefaultFeatures = [ "default" "derive" "serde_derive" "std" ];
+      };
+      "serde_core" = rec {
+        crateName = "serde_core";
+        version = "1.0.229";
+        edition = "2021";
+        sha256 = "0j1ajiha76h3nmd976il9li6975k121xa7jb39ws8n0yqp4s5p37";
+        authors = [
+          "Erick Tryzelaar <erick.tryzelaar@gmail.com>"
+          "David Tolnay <dtolnay@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "serde_derive";
+            packageId = "serde_derive";
+            target = { target, features }: false;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "serde_derive";
+            packageId = "serde_derive";
+          }
+        ];
+        features = {
+          "default" = [ "std" "result" ];
+        };
+        resolvedDefaultFeatures = [ "result" "std" ];
+      };
+      "serde_derive" = rec {
+        crateName = "serde_derive";
+        version = "1.0.229";
+        edition = "2021";
+        sha256 = "0j4k63i7h1bikxwz2c89ig0hrwbnl9mz1czn85xx99x5cc9dg9g7";
+        procMacro = true;
+        authors = [
+          "Erick Tryzelaar <erick.tryzelaar@gmail.com>"
+          "David Tolnay <dtolnay@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+            usesDefaultFeatures = false;
+            features = [ "proc-macro" ];
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+            usesDefaultFeatures = false;
+            features = [ "proc-macro" ];
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.5";
+            usesDefaultFeatures = false;
+            features = [ "clone-impls" "derive" "parsing" "printing" "proc-macro" ];
+          }
+        ];
+        features = {
+        };
+        resolvedDefaultFeatures = [ "default" ];
       };
       "sha2" = rec {
         crateName = "sha2";
@@ -1792,20 +2549,25 @@ rec {
       };
       "signal" = rec {
         crateName = "signal";
-        version = "11.0.0";
+        version = "11.2.0";
         edition = "2024";
         links = "signal";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal";
-          rev = "6d4eb74a238ea4a6149bd12c42a8c06aec01b154";
-          sha256 = "0hqy8k58s6sc9wz76k8iq40bv636js5s951zgd01ncrxcy6h776a";
+          rev = "4f5cbb9322ecae7a8821439179e778d495d7804a";
+          sha256 = "14f2bwprz32psr58n9i36padya0r4p54hwm1yq145h1ab6nawvk2";
         };
         dependencies = [
           {
             name = "datom-codec";
             packageId = "datom-codec";
             optional = true;
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            usesDefaultFeatures = false;
           }
           {
             name = "protos";
@@ -1836,13 +2598,13 @@ rec {
       };
       "signal-belief-nexus" = rec {
         crateName = "signal-belief-nexus";
-        version = "0.4.2";
+        version = "1.0.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-belief-nexus";
-          rev = "011eea2aa83bc07db1fb318b7dcb4d30267e7c2d";
-          sha256 = "0nmkmv6s7g57k5v3z5vqwk3vpf7vpc2m1lvj8vp6rq1yyyxafk7x";
+          rev = "c8542d3ac380130190f3d2592b9c1c2f342e3ffa";
+          sha256 = "1z9ikhh62hq75pybj57dhc5pwsz9vqdmjy7c82plnk30wi88wvk7";
         };
         libName = "signal_belief_nexus";
         dependencies = [
@@ -1877,7 +2639,29 @@ rec {
         features = {
           "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" "translator/datom" ];
         };
-        resolvedDefaultFeatures = [ "datom" "default" ];
+        resolvedDefaultFeatures = [ "datom" ];
+      };
+      "signal-hook-registry" = rec {
+        crateName = "signal-hook-registry";
+        version = "1.4.8";
+        edition = "2015";
+        sha256 = "06vc7pmnki6lmxar3z31gkyg9cw7py5x9g7px70gy2hil75nkny4";
+        libName = "signal_hook_registry";
+        authors = [
+          "Michal 'vorner' Vaner <vorner@vorner.cz>"
+          "Masaki Hara <ackie.h.gmai@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "errno";
+            packageId = "errno";
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+          }
+        ];
+
       };
       "simdutf8" = rec {
         crateName = "simdutf8";
@@ -1904,6 +2688,32 @@ rec {
           "serde" = [ "dep:serde" ];
         };
         resolvedDefaultFeatures = [ "std" ];
+      };
+      "socket2" = rec {
+        crateName = "socket2";
+        version = "0.6.5";
+        edition = "2021";
+        sha256 = "1m7diygswpvlpvrxd6ap169nxgax014jr8220nqlr3bzyb3y5lf3";
+        authors = [
+          "Alex Crichton <alex@alexcrichton.com>"
+          "Thomas de Zeeuw <thomasdezeeuw@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "libc";
+            packageId = "libc";
+            target = { target, features }: ((target."unix" or false) || ("wasi" == target."os" or null));
+          }
+          {
+            name = "windows-sys";
+            packageId = "windows-sys";
+            target = { target, features }: (target."windows" or false);
+            features = [ "Win32_Foundation" "Win32_Networking_WinSock" "Win32_System_IO" "Win32_System_Threading" "Win32_System_WindowsProgramming" ];
+          }
+        ];
+        features = {
+        };
+        resolvedDefaultFeatures = [ "all" ];
       };
       "syn 2.0.119" = rec {
         crateName = "syn";
@@ -1936,7 +2746,7 @@ rec {
           "proc-macro" = [ "proc-macro2/proc-macro" "quote?/proc-macro" ];
           "test" = [ "syn-test-suite/all-features" ];
         };
-        resolvedDefaultFeatures = [ "clone-impls" "default" "derive" "full" "parsing" "printing" "proc-macro" ];
+        resolvedDefaultFeatures = [ "clone-impls" "default" "derive" "extra-traits" "full" "parsing" "printing" "proc-macro" "visit-mut" ];
       };
       "syn 3.0.5" = rec {
         crateName = "syn";
@@ -2106,6 +2916,157 @@ rec {
         ];
 
       };
+      "tokio" = rec {
+        crateName = "tokio";
+        version = "1.53.1";
+        edition = "2021";
+        sha256 = "1v8b3b45pkpbibls75yniqbvx5dlks2708141ljni5mnf6lawb10";
+        authors = [
+          "Tokio Contributors <team@tokio.rs>"
+        ];
+        dependencies = [
+          {
+            name = "bytes";
+            packageId = "bytes";
+            optional = true;
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+            optional = true;
+            target = { target, features }: ((target."tokio_unstable" or false) && ("linux" == target."os" or null));
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+            optional = true;
+            target = { target, features }: ("wasi" == target."os" or null);
+          }
+          {
+            name = "libc";
+            packageId = "libc";
+            optional = true;
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "mio";
+            packageId = "mio";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "mio";
+            packageId = "mio";
+            optional = true;
+            usesDefaultFeatures = false;
+            target = { target, features }: ((target."tokio_unstable" or false) && ("linux" == target."os" or null));
+            features = [ "os-poll" "os-ext" ];
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+          {
+            name = "signal-hook-registry";
+            packageId = "signal-hook-registry";
+            optional = true;
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "socket2";
+            packageId = "socket2";
+            optional = true;
+            target = { target, features }: ((!(builtins.elem "wasm" target."family")) || (("wasi" == target."os" or null) && (!("p1" == target."env" or null))));
+            features = [ "all" ];
+          }
+          {
+            name = "tokio-macros";
+            packageId = "tokio-macros";
+            optional = true;
+          }
+          {
+            name = "tracing";
+            packageId = "tracing";
+            optional = true;
+            usesDefaultFeatures = false;
+            target = { target, features }: (target."tokio_unstable" or false);
+            features = [ "std" ];
+          }
+          {
+            name = "windows-sys";
+            packageId = "windows-sys";
+            optional = true;
+            target = { target, features }: (target."windows" or false);
+          }
+        ];
+        devDependencies = [
+          {
+            name = "libc";
+            packageId = "libc";
+            target = { target, features }: (target."unix" or false);
+          }
+          {
+            name = "socket2";
+            packageId = "socket2";
+            target = { target, features }: (!(builtins.elem "wasm" target."family"));
+          }
+          {
+            name = "windows-sys";
+            packageId = "windows-sys";
+            target = { target, features }: (target."windows" or false);
+            features = [ "Win32_Foundation" "Win32_Security_Authorization" ];
+          }
+        ];
+        features = {
+          "bytes" = [ "dep:bytes" ];
+          "full" = [ "fs" "io-util" "io-std" "macros" "net" "parking_lot" "process" "rt" "rt-multi-thread" "signal" "sync" "time" ];
+          "io-uring" = [ "dep:io-uring" "libc" "mio/os-poll" "mio/os-ext" "dep:slab" ];
+          "io-util" = [ "bytes" ];
+          "libc" = [ "dep:libc" ];
+          "macros" = [ "tokio-macros" ];
+          "mio" = [ "dep:mio" ];
+          "net" = [ "libc" "mio/os-poll" "mio/os-ext" "mio/net" "socket2" "windows-sys/Win32_Foundation" "windows-sys/Win32_Security" "windows-sys/Win32_Storage_FileSystem" "windows-sys/Win32_System_Pipes" "windows-sys/Win32_System_SystemServices" ];
+          "parking_lot" = [ "dep:parking_lot" ];
+          "process" = [ "bytes" "libc" "mio/os-poll" "mio/os-ext" "mio/net" "signal-hook-registry" "windows-sys/Win32_Foundation" "windows-sys/Win32_System_Threading" "windows-sys/Win32_System_WindowsProgramming" ];
+          "rt-multi-thread" = [ "rt" ];
+          "signal" = [ "libc" "mio/os-poll" "mio/net" "mio/os-ext" "signal-hook-registry" "windows-sys/Win32_Foundation" "windows-sys/Win32_System_Console" ];
+          "signal-hook-registry" = [ "dep:signal-hook-registry" ];
+          "socket2" = [ "dep:socket2" ];
+          "taskdump" = [ "dep:backtrace" ];
+          "test-util" = [ "rt" "sync" "time" ];
+          "tokio-macros" = [ "dep:tokio-macros" ];
+          "tracing" = [ "dep:tracing" ];
+          "windows-sys" = [ "dep:windows-sys" ];
+        };
+        resolvedDefaultFeatures = [ "bytes" "default" "io-util" "libc" "macros" "mio" "net" "rt" "rt-multi-thread" "signal" "signal-hook-registry" "socket2" "sync" "time" "tokio-macros" "tracing" "windows-sys" ];
+      };
+      "tokio-macros" = rec {
+        crateName = "tokio-macros";
+        version = "2.7.2";
+        edition = "2021";
+        sha256 = "03kvy2r5gr4zccm4vdx8vvv3q69kbjc1b006rs11aibz74m3lxvq";
+        procMacro = true;
+        libName = "tokio_macros";
+        authors = [
+          "Tokio Contributors <team@tokio.rs>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.5";
+            features = [ "full" ];
+          }
+        ];
+
+      };
       "toml_datetime" = rec {
         crateName = "toml_datetime";
         version = "0.6.11";
@@ -2162,15 +3123,106 @@ rec {
         };
         resolvedDefaultFeatures = [ "alloc" "default" "std" ];
       };
+      "tracing" = rec {
+        crateName = "tracing";
+        version = "0.1.44";
+        edition = "2018";
+        sha256 = "006ilqkg1lmfdh3xhg3z762izfwmxcvz0w7m4qx2qajbz9i1drv3";
+        authors = [
+          "Eliza Weisman <eliza@buoyant.io>"
+          "Tokio Contributors <team@tokio.rs>"
+        ];
+        dependencies = [
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+          {
+            name = "tracing-attributes";
+            packageId = "tracing-attributes";
+            optional = true;
+          }
+          {
+            name = "tracing-core";
+            packageId = "tracing-core";
+            usesDefaultFeatures = false;
+          }
+        ];
+        features = {
+          "attributes" = [ "tracing-attributes" ];
+          "default" = [ "std" "attributes" ];
+          "log" = [ "dep:log" ];
+          "log-always" = [ "log" ];
+          "std" = [ "tracing-core/std" ];
+          "tracing-attributes" = [ "dep:tracing-attributes" ];
+          "valuable" = [ "tracing-core/valuable" ];
+        };
+        resolvedDefaultFeatures = [ "attributes" "default" "std" "tracing-attributes" ];
+      };
+      "tracing-attributes" = rec {
+        crateName = "tracing-attributes";
+        version = "0.1.31";
+        edition = "2018";
+        sha256 = "1np8d77shfvz0n7camx2bsf1qw0zg331lra0hxb4cdwnxjjwz43l";
+        procMacro = true;
+        libName = "tracing_attributes";
+        authors = [
+          "Tokio Contributors <team@tokio.rs>"
+          "Eliza Weisman <eliza@buoyant.io>"
+          "David Barsky <dbarsky@amazon.com>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "syn";
+            packageId = "syn 2.0.119";
+            usesDefaultFeatures = false;
+            features = [ "full" "parsing" "printing" "visit-mut" "clone-impls" "extra-traits" "proc-macro" ];
+          }
+        ];
+        features = {
+        };
+      };
+      "tracing-core" = rec {
+        crateName = "tracing-core";
+        version = "0.1.36";
+        edition = "2018";
+        sha256 = "16mpbz6p8vd6j7sf925k9k8wzvm9vdfsjbynbmaxxyq6v7wwm5yv";
+        libName = "tracing_core";
+        authors = [
+          "Tokio Contributors <team@tokio.rs>"
+        ];
+        dependencies = [
+          {
+            name = "once_cell";
+            packageId = "once_cell";
+            optional = true;
+          }
+        ];
+        features = {
+          "default" = [ "std" "valuable?/std" ];
+          "once_cell" = [ "dep:once_cell" ];
+          "std" = [ "once_cell" ];
+          "valuable" = [ "dep:valuable" ];
+        };
+        resolvedDefaultFeatures = [ "once_cell" "std" ];
+      };
       "translator" = rec {
         crateName = "translator";
-        version = "0.5.0";
+        version = "0.5.2";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/translator";
-          rev = "abc89b9cc7469a35700cb222ba31a8f5cb0745e6";
-          sha256 = "1907l121f2i6qvfimxn5n2vp2wbhsb3rwfwm82x2x0vlfyfdgp1z";
+          rev = "29601a3485bf8b726e7a2da7b3fa73a8a8bce58d";
+          sha256 = "1jsa473338b64cr1bsbwmk1zczs3vba66qxhf5yw4kgaai1ich7z";
         };
         dependencies = [
           {
@@ -2217,7 +3269,144 @@ rec {
           "text" = [ "datom" ];
           "unix" = [ "dep:libc" "dep:nix" ];
         };
-        resolvedDefaultFeatures = [ "datom" "default" "text" "unix" ];
+        resolvedDefaultFeatures = [ "datom" "text" "unix" ];
+      };
+      "translator-client" = rec {
+        crateName = "translator-client";
+        version = "0.3.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/translator";
+          rev = "2739d586e1455a001661fc85a8a61b6219aa99df";
+          sha256 = "10dhydxxhx154bnvib7rnirj826mrca8s6rqaz83z44ca3k3hvms";
+        };
+        libName = "translator_client";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "translator";
+            packageId = "translator";
+            rename = "shared-translator";
+            usesDefaultFeatures = false;
+            features = [ "unix" ];
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "nexus-exchange/datom" "shared-translator/datom" ];
+        };
+        resolvedDefaultFeatures = [ "datom" ];
+      };
+      "translator-serving" = rec {
+        crateName = "translator-serving";
+        version = "0.3.0";
+        edition = "2024";
+        workspace_member = null;
+        src = pkgs.fetchgit {
+          url = "https://github.com/LiGoldragon/translator";
+          rev = "2739d586e1455a001661fc85a8a61b6219aa99df";
+          sha256 = "10dhydxxhx154bnvib7rnirj826mrca8s6rqaz83z44ca3k3hvms";
+        };
+        libName = "translator_serving";
+        dependencies = [
+          {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "nexus-exchange";
+            packageId = "nexus-exchange";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "nexus-querying";
+            packageId = "nexus-querying";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "nexus-serving";
+            packageId = "nexus-serving";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "nix";
+            packageId = "nix";
+            features = [ "fs" "poll" "process" "signal" "socket" "user" ];
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
+            name = "rkyv";
+            packageId = "rkyv";
+            usesDefaultFeatures = false;
+            features = [ "std" "bytecheck" "little_endian" "pointer_width_32" "unaligned" ];
+          }
+          {
+            name = "rustix";
+            packageId = "rustix";
+            features = [ "process" "rand" ];
+          }
+          {
+            name = "signal";
+            packageId = "signal";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            features = [ "macros" "net" "rt" "signal" ];
+          }
+          {
+            name = "translator";
+            packageId = "translator";
+            rename = "shared-translator";
+            usesDefaultFeatures = false;
+            features = [ "unix" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            features = [ "macros" "net" "rt" "rt-multi-thread" "signal" ];
+          }
+        ];
+        features = {
+          "datom" = [ "dep:datom-codec" "dep:protos" "nexus-exchange/datom" "shared-translator/datom" ];
+          "text" = [ "datom" "shared-translator/text" ];
+        };
+        resolvedDefaultFeatures = [ "datom" "text" ];
       };
       "typenum" = rec {
         crateName = "typenum";
@@ -2309,6 +3498,22 @@ rec {
           "Sergio Benitez <sb@sergio.bz>"
         ];
 
+      };
+      "wasi" = rec {
+        crateName = "wasi";
+        version = "0.11.1+wasi-snapshot-preview1";
+        edition = "2018";
+        sha256 = "0jx49r7nbkbhyfrfyhz0bm4817yrnxgd3jiwwwfv0zl439jyrwyc";
+        authors = [
+          "The Cranelift Project Developers"
+        ];
+        features = {
+          "core" = [ "dep:core" ];
+          "default" = [ "std" ];
+          "rustc-dep-of-std" = [ "core" "rustc-std-workspace-alloc" ];
+          "rustc-std-workspace-alloc" = [ "dep:rustc-std-workspace-alloc" ];
+        };
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "wasm-bindgen" = rec {
         crateName = "wasm-bindgen";
@@ -2707,7 +3912,7 @@ rec {
           "Win32_Web" = [ "Win32" ];
           "Win32_Web_InternetExplorer" = [ "Win32_Web" ];
         };
-        resolvedDefaultFeatures = [ "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_Diagnostics" "Win32_System_Diagnostics_Debug" "default" ];
+        resolvedDefaultFeatures = [ "Wdk" "Wdk_Foundation" "Wdk_Storage" "Wdk_Storage_FileSystem" "Wdk_System" "Wdk_System_IO" "Win32" "Win32_Foundation" "Win32_Networking" "Win32_Networking_WinSock" "Win32_Security" "Win32_Storage" "Win32_Storage_FileSystem" "Win32_System" "Win32_System_Console" "Win32_System_Diagnostics" "Win32_System_Diagnostics_Debug" "Win32_System_IO" "Win32_System_Pipes" "Win32_System_SystemServices" "Win32_System_Threading" "Win32_System_WindowsProgramming" "default" ];
       };
       "winnow" = rec {
         crateName = "winnow";

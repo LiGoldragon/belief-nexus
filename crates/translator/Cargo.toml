@@ -1,23 +1,37 @@
 [package]
 name = "belief-nexus-translator"
-version = "0.2.0"
-edition = "2021"
-rust-version = "1.89"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
 license = "MIT"
 
 [lib]
 path = "src/lib.rs"
 
+# The generated kinds derive their datom traits under `datom`; the translator
+# speaks text, so every build of it turns it on.
+[features]
+default = []
+datom = []
+
 [dependencies]
+belief-nexus-wire = { path = "../wire", features = ["datom"] }
+emission-belief-nexus = { path = "../emission", features = ["datom"] }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598" }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
-signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
-shared-translator = { package = "translator", git = "https://github.com/LiGoldragon/translator", rev = "abc89b9", features = ["text", "unix"] }
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "011eea2", features = ["datom"] }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "eb43351", features = ["datom"] }
-emission-belief-nexus = { path = "../emission", features = ["datom"] }
-nix = { version = "0.30", features = ["socket", "user", "signal", "process"] }
+signal.workspace = true
+signal-belief-nexus = { workspace = true, features = ["datom"] }
+meta-signal-belief-nexus = { workspace = true, features = ["datom"] }
+shared-translator = { workspace = true, features = ["text"] }
+nexus-exchange = { workspace = true, features = ["datom"] }
+nexus-querying.workspace = true
+translator-client = { workspace = true, features = ["datom"] }
+translator-serving = { workspace = true, features = ["text"] }
+nix = { version = "0.30", features = ["fs", "poll", "process", "signal", "socket", "user"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

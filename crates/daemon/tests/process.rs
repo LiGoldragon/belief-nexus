@@ -1,13 +1,15 @@
 //! The real Nexus process, paired with this test process as its translator: its meta and public
-//! sockets speak the exchange layer (greet, Open, Answer, End), a Subscribe is answered with the
-//! frames of a stream, direct peers are admitted by their configured binding, and the state
+//! sockets speak the exchange layer (greet, Open, Answer, End), a one-answer exchange is answered
+//! once and ended, a Subscribe is answered with the frames of a stream and a refused one is
+//! answered once and ended, direct peers are admitted by their configured binding, and the state
 //! survives a restart.
 
-use belief_nexus_wire::transport::{MemoryFileName, NexusBootstrap};
 use belief_nexus_wire::{meta_call, public_call, BeliefNexus};
 use meta_signal_belief_nexus as meta;
 use nexus_exchange::lane::{Frame, Kind, Lane, LaneReading, LaneWriting};
-use nexus_querying::{Patience, Querying, QueryingConnection};
+use nexus_exchange::ExchangeError;
+use nexus_querying::{ExchangeFollowing, Patience, Querying, QueryingConnection};
+use nexus_serving::{InstanceId, NexusBootstrap};
 use signal::{ByteViewable, Delivery, FrameBody, FrameWriting, Restorable, Signal, Signalizable};
 use signal_belief_nexus as wire;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,8 +31,8 @@ fn own_caller() -> translator::Caller {
     }
 }
 
-/// One public exchange: greet, open the call, read its one answer.
-fn public(socket: &Path, caller: translator::Caller, query: wire::Input) -> wire::Output {
+/// Every answer of one public exchange, read until the Nexus ends it Completed.
+fn public_answers(socket: &Path, caller: translator::Caller, query: wire::Input) -> Vec<wire::Output> {
     let stream = UnixStream::connect(socket).unwrap();
     let mut connection = QueryingConnection::<public_call::Input, public_call::Output>::greeted(
         stream,
@@ -41,16 +43,27 @@ fn public(socket: &Path, caller: translator::Caller, query: wire::Input) -> wire
     let exchange = connection
         .open(public_call::Input::Call(public_call::Call_Data { caller, query }))
         .unwrap();
-    match connection.delivery().unwrap() {
-        Some(Delivery::Answer(answer)) if answer.exchange == exchange => match answer.response {
-            public_call::Output::Answered(output) => output,
-            public_call::Output::Failed(message) => panic!("the Nexus failed: {message}"),
-        },
-        _ => panic!("the Nexus gave no answer"),
-    }
+    let mut answers = Vec::new();
+    connection
+        .follow::<ExchangeError>(exchange, |response| {
+            match response {
+                public_call::Output::Answered(output) => answers.push(output),
+                public_call::Output::Failed(message) => panic!("the Nexus failed: {message}"),
+            }
+            Ok(())
+        })
+        .expect("the exchange ends Completed");
+    answers
 }
 
-/// One meta exchange, as the paired translator.
+/// One public exchange: greet, open the call, read its one answer and its End.
+fn public(socket: &Path, caller: translator::Caller, query: wire::Input) -> wire::Output {
+    let mut answers = public_answers(socket, caller, query);
+    assert_eq!(answers.len(), 1, "a one-answer exchange is answered once: {answers:?}");
+    answers.remove(0)
+}
+
+/// One meta exchange, as the paired translator: its one answer, then its End.
 fn meta_exchange(socket: &Path, input: meta_call::Input) -> meta_call::Output {
     let stream = UnixStream::connect(socket).unwrap();
     let mut connection = QueryingConnection::<meta_call::Input, meta_call::Output>::greeted(
@@ -60,10 +73,15 @@ fn meta_exchange(socket: &Path, input: meta_call::Input) -> meta_call::Output {
     )
     .unwrap();
     let exchange = connection.open(input).unwrap();
-    match connection.delivery().unwrap() {
-        Some(Delivery::Answer(answer)) if answer.exchange == exchange => answer.response,
-        _ => panic!("the Nexus gave no meta answer"),
-    }
+    let mut answers = Vec::new();
+    connection
+        .follow::<ExchangeError>(exchange, |response| {
+            answers.push(response);
+            Ok(())
+        })
+        .expect("the meta exchange ends Completed");
+    assert_eq!(answers.len(), 1, "a meta exchange is answered once: {answers:?}");
+    answers.remove(0)
 }
 
 fn configure(socket: &Path, revision: i64, set: meta::Set) -> meta::Output {
@@ -93,10 +111,12 @@ fn serve_emissions(socket: &Path) {
             let attempt = Signal::<emission_belief_nexus::EmissionAttempt>::from(request.payload)
                 .restore()
                 .unwrap();
-            let outcome = emission_belief_nexus::EmissionAttemptOutcome {
-                configuration_revision: attempt.configuration_revision,
-                output: executor.execute(attempt.input),
-            };
+            let outcome = emission_belief_nexus::EmissionAnswer::Attempted(
+                emission_belief_nexus::EmissionAttemptOutcome {
+                    configuration_revision: attempt.configuration_revision,
+                    output: executor.execute(attempt.input),
+                },
+            );
             stream
                 .write_lane_frame(
                     &Frame {
@@ -133,8 +153,7 @@ fn bootstrap(place: translator::Place) -> NexusBootstrap {
             user_id: caller.user_id,
             process_id: caller.process_id,
         },
-        owner: wire::Owner::Login(caller.user_id),
-        memory_file_name: MemoryFileName("memory".into()),
+        instance_id: InstanceId("process".into()),
     }
 }
 
@@ -359,6 +378,9 @@ fn every_exchange_is_answered_on_its_own_identifier_and_the_translator_restores_
         matches!(public(&paths.public, own_caller(), wire::Input::Resolve(Vec::new())), wire::Output::Refused(wire::Refusal::NotReady)),
         "an unconfigured Nexus answers NotReady"
     );
+    // A refused Subscribe is answered once and its exchange ended, as every exchange is.
+    let refused = public_answers(&paths.public, own_caller(), wire::Input::Subscribe);
+    assert_eq!(refused, vec![wire::Output::Refused(wire::Refusal::NotReady)], "a refused Subscribe ends after its refusal");
     for (revision, set) in ready_sets(Vec::new()).into_iter().enumerate() {
         assert!(matches!(configure(&paths.meta, revision as i64, set), meta::Output::Configured(_)));
     }

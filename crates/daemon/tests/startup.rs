@@ -1,12 +1,13 @@
-//! Startup of the Nexus from a bootstrap: the bootstrap is validated before any effect, and the
-//! memory file is selected at the prepared Place under its exclusion before a socket is bound or
-//! the store is opened.
+//! Startup of the Nexus from the bootstrap every Nexus starts with: the bootstrap is validated
+//! before any effect, and the memory file, `belief.memory` in the Place's state directory, is
+//! selected at the prepared Place under its exclusion before a socket is bound or the store is
+//! opened.
 
 use belief_nexus_daemon::{
     effective_user, BootstrapError, Daemon, DaemonBootstrap, EmissionPort, FileMemory, MemoryImage,
     MemoryStore, PreparesMemory,
 };
-use belief_nexus_wire::transport::{MemoryFileName, NexusBootstrap};
+use nexus_serving::{InstanceId, NexusBootstrap};
 use emission_belief_nexus as emission;
 use meta_signal_belief_nexus as meta;
 use signal::{ByteViewable, FrameBody, FrameCapacity, FrameWriting, Signalizable};
@@ -54,7 +55,7 @@ fn place(runtime: &Path, state: &Path) -> translator::Place {
 }
 
 /// A bootstrap paired with this test process, which is alive for as long as the Nexus it starts.
-fn bootstrap(place: translator::Place, file: &str) -> NexusBootstrap {
+fn bootstrap(place: translator::Place) -> NexusBootstrap {
     NexusBootstrap {
         place,
         admission: nexus_exchange::Admission {
@@ -66,13 +67,16 @@ fn bootstrap(place: translator::Place, file: &str) -> NexusBootstrap {
             user_id: user(),
             process_id: translator::ProcessId(i64::from(std::process::id())),
         },
-        owner: wire::Owner::Login(user()),
-        memory_file_name: MemoryFileName(file.into()),
+        instance_id: InstanceId("startup".into()),
     }
 }
 
-fn standard(tree: &Tree, file: &str) -> NexusBootstrap {
-    bootstrap(place(&tree.runtime(), &tree.state()), file)
+/// The memory file every Belief Nexus keeps, and the legacy name it is renamed from.
+const MEMORY: &str = "belief.memory";
+const LEGACY_MEMORY: &str = "belief.sema";
+
+fn standard(tree: &Tree) -> NexusBootstrap {
+    bootstrap(place(&tree.runtime(), &tree.state()))
 }
 
 fn image_bytes(path: &Path) -> Vec<u8> {
@@ -118,10 +122,10 @@ fn is_root() -> bool {
 fn a_legacy_only_state_directory_is_moved_intact_and_the_real_store_is_loaded_not_replaced() {
     let tree = Tree::new();
     std::fs::create_dir_all(tree.legacy()).unwrap();
-    let original = image_bytes(&tree.legacy().join("memory"));
-    let value = standard(&tree, "memory");
+    let original = image_bytes(&tree.legacy().join(MEMORY));
+    let value = standard(&tree);
     let path = value.prepared_memory(effective_user()).expect("prepared");
-    assert_eq!(path, tree.state().join("memory"));
+    assert_eq!(path, tree.state().join(MEMORY));
     assert!(!tree.legacy().exists(), "the legacy directory is gone");
     assert_eq!(
         std::fs::read(&path).unwrap(),
@@ -142,10 +146,10 @@ fn a_legacy_only_state_directory_is_moved_intact_and_the_real_store_is_loaded_no
 fn a_sole_sema_file_is_renamed_to_the_current_name_and_a_repeat_changes_nothing() {
     let tree = Tree::new();
     std::fs::create_dir_all(tree.state()).unwrap();
-    let original = image_bytes(&tree.state().join("memory.sema"));
-    let value = standard(&tree, "memory");
+    let original = image_bytes(&tree.state().join(LEGACY_MEMORY));
+    let value = standard(&tree);
     let path = value.prepared_memory(effective_user()).expect("selected");
-    assert!(!tree.state().join("memory.sema").exists());
+    assert!(!tree.state().join(LEGACY_MEMORY).exists());
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert_eq!(
         value.prepared_memory(effective_user()).expect("repeat"),
@@ -157,7 +161,7 @@ fn a_sole_sema_file_is_renamed_to_the_current_name_and_a_repeat_changes_nothing(
 #[test]
 fn current_only_and_neither_select_the_current_path_without_creating_the_file() {
     let tree = Tree::new();
-    let value = standard(&tree, "memory");
+    let value = standard(&tree);
     let path = value.prepared_memory(effective_user()).expect("neither");
     assert!(tree.state().is_dir() && tree.runtime().is_dir());
     assert!(
@@ -178,18 +182,18 @@ fn current_only_and_neither_select_the_current_path_without_creating_the_file() 
 fn both_files_are_a_typed_conflict_and_neither_is_changed() {
     let tree = Tree::new();
     std::fs::create_dir_all(tree.state()).unwrap();
-    std::fs::write(tree.state().join("memory"), b"current").unwrap();
-    std::fs::write(tree.state().join("memory.sema"), b"legacy").unwrap();
-    let error = standard(&tree, "memory")
+    std::fs::write(tree.state().join(MEMORY), b"current").unwrap();
+    std::fs::write(tree.state().join(LEGACY_MEMORY), b"legacy").unwrap();
+    let error = standard(&tree)
         .prepared_memory(effective_user())
         .unwrap_err();
     assert!(matches!(error, BootstrapError::MemoryFile(_)), "{error:?}");
     assert_eq!(
-        std::fs::read(tree.state().join("memory")).unwrap(),
+        std::fs::read(tree.state().join(MEMORY)).unwrap(),
         b"current"
     );
     assert_eq!(
-        std::fs::read(tree.state().join("memory.sema")).unwrap(),
+        std::fs::read(tree.state().join(LEGACY_MEMORY)).unwrap(),
         b"legacy"
     );
 }
@@ -199,18 +203,18 @@ fn both_directories_are_a_typed_preparation_conflict_and_neither_is_changed() {
     let tree = Tree::new();
     std::fs::create_dir_all(tree.legacy()).unwrap();
     std::fs::create_dir_all(tree.state()).unwrap();
-    std::fs::write(tree.legacy().join("memory"), b"legacy").unwrap();
-    std::fs::write(tree.state().join("memory"), b"current").unwrap();
-    let error = standard(&tree, "memory")
+    std::fs::write(tree.legacy().join(MEMORY), b"legacy").unwrap();
+    std::fs::write(tree.state().join(MEMORY), b"current").unwrap();
+    let error = standard(&tree)
         .prepared_memory(effective_user())
         .unwrap_err();
     assert!(matches!(error, BootstrapError::Preparation(_)), "{error:?}");
     assert_eq!(
-        std::fs::read(tree.legacy().join("memory")).unwrap(),
+        std::fs::read(tree.legacy().join(MEMORY)).unwrap(),
         b"legacy"
     );
     assert_eq!(
-        std::fs::read(tree.state().join("memory")).unwrap(),
+        std::fs::read(tree.state().join(MEMORY)).unwrap(),
         b"current"
     );
 }
@@ -223,9 +227,9 @@ fn a_failed_selection_is_recovered_by_a_retry_with_the_bytes_intact() {
     use std::os::unix::fs::PermissionsExt;
     let tree = Tree::new();
     std::fs::create_dir_all(tree.state()).unwrap();
-    std::fs::write(tree.state().join("memory.sema"), b"legacy bytes").unwrap();
+    std::fs::write(tree.state().join(LEGACY_MEMORY), b"legacy bytes").unwrap();
     std::fs::set_permissions(tree.state(), std::fs::Permissions::from_mode(0o555)).unwrap();
-    let value = standard(&tree, "memory");
+    let value = standard(&tree);
     let error = value.prepared_memory(effective_user());
     std::fs::set_permissions(tree.state(), std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(
@@ -236,7 +240,7 @@ fn a_failed_selection_is_recovered_by_a_retry_with_the_bytes_intact() {
         "{error:?}"
     );
     assert_eq!(
-        std::fs::read(tree.state().join("memory.sema")).unwrap(),
+        std::fs::read(tree.state().join(LEGACY_MEMORY)).unwrap(),
         b"legacy bytes"
     );
     let path = value.prepared_memory(effective_user()).expect("retry");
@@ -247,8 +251,8 @@ fn a_failed_selection_is_recovered_by_a_retry_with_the_bytes_intact() {
 fn concurrent_selections_of_one_standard_place_rename_once_and_none_fails() {
     let tree = Tree::new();
     std::fs::create_dir_all(tree.state()).unwrap();
-    std::fs::write(tree.state().join("memory.sema"), b"legacy bytes").unwrap();
-    let value = Arc::new(standard(&tree, "memory"));
+    std::fs::write(tree.state().join(LEGACY_MEMORY), b"legacy bytes").unwrap();
+    let value = Arc::new(standard(&tree));
     let succeeded = Arc::new(AtomicUsize::new(0));
     let handles: Vec<_> = (0..8)
         .map(|_| {
@@ -266,9 +270,9 @@ fn concurrent_selections_of_one_standard_place_rename_once_and_none_fails() {
         handle.join().unwrap();
     }
     assert_eq!(succeeded.load(Ordering::SeqCst), 8);
-    assert!(!tree.state().join("memory.sema").exists());
+    assert!(!tree.state().join(LEGACY_MEMORY).exists());
     assert_eq!(
-        std::fs::read(tree.state().join("memory")).unwrap(),
+        std::fs::read(tree.state().join(MEMORY)).unwrap(),
         b"legacy bytes"
     );
 }
@@ -280,38 +284,50 @@ fn an_explicit_place_keeps_its_decoys_and_looks_for_no_legacy_directory() {
     std::fs::create_dir_all(&state).unwrap();
     std::fs::write(state.join("decoy"), b"decoy").unwrap();
     std::fs::create_dir_all(tree.legacy()).unwrap();
-    std::fs::write(tree.legacy().join("memory"), b"unrelated legacy").unwrap();
-    let value = bootstrap(place(&tree.path().join("custom-run"), &state), "memory");
+    std::fs::write(tree.legacy().join(MEMORY), b"unrelated legacy").unwrap();
+    let value = bootstrap(place(&tree.path().join("custom-run"), &state));
     let path = value.prepared_memory(effective_user()).expect("explicit");
-    assert_eq!(path, state.join("memory"));
+    assert_eq!(path, state.join(MEMORY));
     assert_eq!(std::fs::read(state.join("decoy")).unwrap(), b"decoy");
     assert_eq!(
-        std::fs::read(tree.legacy().join("memory")).unwrap(),
+        std::fs::read(tree.legacy().join(MEMORY)).unwrap(),
         b"unrelated legacy"
     );
+}
+
+/// Bootstraps refused before any effect: an unsafe place name, an unnormalized root, and a
+/// paired translator of another login.
+fn invalid_bootstraps(tree: &Tree) -> Vec<NexusBootstrap> {
+    let mut unsafe_name = standard(tree);
+    unsafe_name.place.place_name = translator::PlaceName("a/b".into());
+    let mut unnormalized = standard(tree);
+    unnormalized.place.runtime = translator::Runtime(format!("{}/./run", tree.path().display()));
+    let mut other_login = standard(tree);
+    other_login.peer_identity.user_id = translator::UserId(effective_user() + 1);
+    vec![unsafe_name, unnormalized, other_login]
 }
 
 #[test]
 fn an_invalid_bootstrap_has_no_effect_through_the_library_either() {
     let tree = Tree::new();
-    for file in ["", "..", "a/b", "memory.sema"] {
-        let value = standard(&tree, file);
+    for value in invalid_bootstraps(&tree) {
+        let place = value.place.clone();
         assert!(
             matches!(
                 value.prepared_memory(effective_user()),
                 Err(BootstrapError::Refused(_))
             ),
-            "{file:?}"
+            "{place:?}"
         );
         assert!(
             !tree.path().join("state").exists() && !tree.path().join("run").exists(),
-            "{file:?}"
+            "{place:?}"
         );
         let started = Daemon::start_file(DaemonBootstrap { nexus: value }, NoEmission);
         assert!(started.is_err());
         assert!(
             !tree.path().join("state").exists(),
-            "start_file shares the validator: {file:?}"
+            "start_file shares the validator: {place:?}"
         );
     }
 }
@@ -358,7 +374,7 @@ fn a_frame_that_is_not_a_bootstrap_is_refused_before_it_is_read() {
     let mut first = spawn();
     frame(&mut first, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     assert!(exits(&mut first), "a frame of no bootstrap is refused");
-    let mut bytes = standard(&tree, "memory")
+    let mut bytes = standard(&tree)
         .signalize()
         .unwrap()
         .bytes()
@@ -379,16 +395,7 @@ fn a_frame_that_is_not_a_bootstrap_is_refused_before_it_is_read() {
 #[test]
 fn an_invalid_direct_bootstrap_is_refused_with_no_directory_socket_or_store() {
     let tree = Tree::new();
-    let mut other_owner = standard(&tree, "memory");
-    other_owner.owner = wire::Owner::Login(translator::UserId(effective_user() + 1));
-    let mut unnormalized = standard(&tree, "memory");
-    unnormalized.place.runtime = translator::Runtime(format!("{}/./run", tree.path().display()));
-    for value in [
-        standard(&tree, ".."),
-        standard(&tree, "memory.sema"),
-        unnormalized,
-        other_owner,
-    ] {
+    for value in invalid_bootstraps(&tree) {
         let mut child = spawn();
         frame(&mut child, value.signalize().unwrap().bytes().to_vec());
         assert!(exits(&mut child), "{value:?}");
@@ -404,7 +411,6 @@ fn a_valid_direct_bootstrap_does_prepare_and_bind() {
             &tree.path().join("custom-run"),
             &tree.path().join("custom-state"),
         ),
-        "memory",
     );
     let mut child = spawn();
     frame(&mut child, value.signalize().unwrap().bytes().to_vec());
@@ -420,7 +426,7 @@ fn a_valid_direct_bootstrap_does_prepare_and_bind() {
         bound,
         "the positive control binds, so the no-effect checks above are not vacuous"
     );
-    assert!(tree.path().join("custom-state/memory").exists());
+    assert!(tree.path().join("custom-state").join(MEMORY).exists());
 }
 
 /// The published 0.3.0 `NexusBootstrap`, field for field, from meta-signal-belief-nexus at
@@ -483,7 +489,7 @@ fn a_retained_old_bootstrap_sent_as_the_first_frame_is_refused_before_any_effect
                 .into_owned(),
         )),
         memory_path: previous::MemoryPath(
-            tree.state().join("memory").to_string_lossy().into_owned(),
+            tree.state().join(MEMORY).to_string_lossy().into_owned(),
         ),
         admission: previous::Admission {
             byte_limit: previous::ByteLimit(1_000_000),

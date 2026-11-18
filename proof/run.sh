@@ -14,7 +14,10 @@ cleanup() {
 }
 trap cleanup EXIT
 export XDG_RUNTIME_DIR="$base/run"
-runtime="$XDG_RUNTIME_DIR/metaflow/proof"
+export XDG_CONFIG_HOME="$base/config"
+mkdir -p "$XDG_CONFIG_HOME/nexus"
+printf '%s\n' '{ proof }' > "$XDG_CONFIG_HOME/nexus/belief.datom"
+runtime="$XDG_RUNTIME_DIR/nexus/proof"
 state="$base/state"
 repository="$base/repository"
 codex_workspace="$base/codex"
@@ -36,17 +39,17 @@ git -C "$claude_workspace" init -b main >/dev/null
 pair_pid=$!
 for _ in $(seq 1 200); do
   kill -0 "$pair_pid" 2>/dev/null || { cat "$base/pair.log" >&2; exit 1; }
-  [[ -S "$runtime/belief-translator.sock" ]] && sleep 0.5 && break
+  [[ -S "$runtime/belief-meta-translator.sock" ]] && break
   sleep 0.05
 done
 
-meta="$("$pkg/bin/belief-nexus-meta" proof 'Configure.{ None RepositoryPolling.200 }')"
+meta="$("$pkg/bin/belief-nexus-meta" 'Configure.{ None RepositoryPolling.200 }')"
 [[ "$meta" == Configured.*Ready* ]]
-registered="$("$pkg/bin/belief-nexus" proof "Register.«$repository»")"
+registered="$("$pkg/bin/belief-nexus" "Register.«$repository»")"
 [[ "$registered" == Registered.* ]]
 modules='[ { Spirit core } { Knowledge witness } { Vision override } ]'
-codex_furnished="$("$pkg/bin/belief-nexus" proof "Furnish.{ «$codex_workspace» Codex $modules }")"
-claude_furnished="$("$pkg/bin/belief-nexus" proof "Furnish.{ «$claude_workspace» Claude $modules }")"
+codex_furnished="$("$pkg/bin/belief-nexus" "Furnish.{ «$codex_workspace» Codex $modules }")"
+claude_furnished="$("$pkg/bin/belief-nexus" "Furnish.{ «$claude_workspace» Claude $modules }")"
 for result in "$codex_furnished" "$claude_furnished"; do
   [[ "$result" == Furnished.* ]]
   [[ "$result" == *'{ Spirit core }'* && "$result" == *'{ Knowledge witness }'* && "$result" == *'{ Vision override }'* ]]

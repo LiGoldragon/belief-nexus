@@ -1,0 +1,20 @@
+[ RepositoryPolling.100
+  SubscriberCapacity.64
+  OrdinaryPeers.[]
+  MetaPeers.[]
+  HarnessLayout.{ Codex { «.belief» «generations» «current» «.codex/config.toml» «model_instructions_file» «instructions.md» «.agents/skills» } }
+  HarnessLayout.{ Claude { «.belief» «generations» «current» «CLAUDE.md» «unused-for-claude» «CLAUDE.md» «.claude/skills» } }
+  PlacementDefault.{ Spirit SystemPrompt }
+  PlacementDefault.{ Intent SystemPrompt }
+  PlacementDefault.{ Vision Skills }
+  PlacementDefault.{ Knowledge Skills }
+  PlacementDefault.{ Role Skills }
+  GenerationRetention.KeepAll
+  NexusFrameCapacity.8388608
+  NexusTransportTimeout.70000
+  CallTimeout.70000
+  OutputLimit.8388608
+  TextBudget.{ 100000 64 }
+  TranslatorFrameCapacity.8388608
+  TranslatorTransportTimeout.70000
+  GitExecutable.«@git@» ]

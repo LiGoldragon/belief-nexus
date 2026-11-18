@@ -1,12 +1,11 @@
-use signal::{FrameCapacity, FrameReading, Restorable, Signal};
+use nexus_serving::{BootstrapReading, NexusBootstrap};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = {
-        let body = std::io::stdin()
-            .lock()
-            .read_frame(FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES))?;
-        Signal::<belief_nexus_wire::transport::NexusBootstrap>::from(Vec::<u8>::from(body))
-            .restore()?
+        let mut input = std::io::stdin().lock();
+        let bootstrap = NexusBootstrap::read_bootstrap(&mut input)?;
+        drop(input);
+        bootstrap
     };
     nix::unistd::close(0)?;
     belief_nexus_daemon::server::run(bootstrap)

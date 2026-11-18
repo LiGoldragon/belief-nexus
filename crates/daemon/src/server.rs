@@ -1,8 +1,9 @@
 //! The Belief Nexus's sockets, served by the serving every Nexus shares
 //! (`nexus-serving`).
 //!
-//! The meta socket answers the paired translator, one exchange at a time;
-//! the public socket answers the paired translator and every direct peer,
+//! The meta socket answers the paired translator, each exchange once, its
+//! connections served on the runtime as the public socket's are; the public
+//! socket answers the paired translator and every direct peer,
 //! each exchange attempted on the state the [`Belief`] actor owns and
 //! answered once, or for a Subscribe with the stream of the owner's
 //! furnishings. Each external effect goes to the translator on the emission
@@ -12,13 +13,12 @@
 use crate::{
     Daemon, DaemonBootstrap, EmissionPort, Event, FileMemory, Frame, PublicCall, Subscription,
 };
-use belief_nexus_wire::transport::NexusBootstrap;
 use belief_nexus_wire::{meta_call, public_call, BeliefNexus, ValidAdmission};
 use emission_belief_nexus as emission;
 use meta_signal_belief_nexus as meta;
 use nexus_serving::{
-    ConnectionServing, EmissionLane, Emitting, Listeners, Listening, MetaAnswering, PeerAdmitting,
-    PublicServing, Reply, SubscriptionClosing, TransportBounded,
+    ConnectionServing, EmissionLane, Emitting, Listeners, Listening, MetaAnswering, MetaServing,
+    NexusBootstrap, PeerAdmitting, PublicServing, Reply, SubscriptionClosing, TransportBounded,
 };
 use signal_belief_nexus as wire;
 use std::convert::Infallible;
@@ -31,9 +31,9 @@ pub type SocketPaths = nexus_serving::SocketPaths<BeliefNexus>;
 /// One public connection, served with the Dispatcher's bodies.
 pub type PublicConnection = nexus_serving::PublicConnection<Dispatcher>;
 
-/// The emission lane to the paired translator. A failure to emit is answered
-/// as the effect's own refusal, as the Nexus answers any effect it could not
-/// see done.
+/// The emission lane to the paired translator. A failed lane is answered as
+/// the effect's own refusal, as the Nexus answers any effect it could not see
+/// done.
 pub struct SocketEmission {
     lane: EmissionLane,
     admission: ValidAdmission,
@@ -50,17 +50,17 @@ impl SocketEmission {
 
 impl EmissionPort for SocketEmission {
     fn emit(&mut self, attempt: emission::EmissionAttempt) -> emission::EmissionAttemptOutcome {
-        let fallback = emission::EmissionAttemptOutcome {
-            configuration_revision: attempt.configuration_revision,
-            output: emission_failure(&attempt.input),
-        };
-        self.lane
-            .emit::<_, emission::EmissionAttemptOutcome>(
-                &attempt,
-                self.admission.deadline,
-                self.admission.frame_capacity,
-            )
-            .unwrap_or(fallback)
+        match self.lane.emit::<_, emission::EmissionAnswer>(
+            &attempt,
+            self.admission.deadline,
+            self.admission.frame_capacity,
+        ) {
+            emission::EmissionAnswer::Attempted(outcome) => outcome,
+            emission::EmissionAnswer::LaneFailed(_) => emission::EmissionAttemptOutcome {
+                configuration_revision: attempt.configuration_revision,
+                output: emission_failure(&attempt.input),
+            },
+        }
     }
 }
 
@@ -396,19 +396,34 @@ impl PublicServing for Dispatcher {
     }
 }
 
-/// The meta socket's body: each meta exchange answered by the actor.
+/// The meta socket's body: each meta exchange answered once by the actor.
+/// The meta contract has no subscription, so its stream carries no frame:
+/// its state and change are uninhabited.
 pub struct MetaDispatcher {
     belief: kameo::actor::ActorRef<Belief>,
 }
 
+/// One meta connection, served with the MetaDispatcher's body.
+pub type MetaConnection = nexus_serving::MetaConnection<MetaDispatcher>;
+
 impl MetaAnswering for MetaDispatcher {
+    type Component = BeliefNexus;
     type Query = meta_call::Input;
     type Response = meta_call::Output;
+    type State = Infallible;
+    type Change = Infallible;
 
-    fn answer(&self, input: meta_call::Input) -> meta_call::Output {
-        match self.belief.ask(AnswerMeta { input }).blocking_send() {
+    fn answer(&self, input: meta_call::Input) -> Reply<meta_call::Output, Infallible, Infallible> {
+        Reply::Once(match self.belief.ask(AnswerMeta { input }).blocking_send() {
             Ok(output) => output,
             Err(error) => meta_call::Output::Failed(error.to_string()),
+        })
+    }
+
+    fn subscribed(frame: signal::Frame<Infallible, Infallible>) -> meta_call::Output {
+        match frame {
+            signal::Frame::Opened(never) | signal::Frame::Lagged(never) => match never {},
+            signal::Frame::Changed(never) => match never {},
         }
     }
 }
@@ -433,9 +448,9 @@ fn poll(belief: kameo::actor::ActorRef<Belief>) {
 
 /// Starts the Nexus its bootstrap names and serves it until a listener fails
 /// for good: the state is restored first, from the memory file in the
-/// prepared place, then both sockets are bound; the meta socket and the
-/// polling run on threads of their own, the public connections on the
-/// runtime.
+/// prepared place, then both sockets are bound; each socket is accepted on a
+/// thread of its own and every connection served on the runtime, and the
+/// polling runs on a thread of its own.
 pub fn run(bootstrap: NexusBootstrap) -> Result<(), Box<dyn std::error::Error>> {
     let admission = ValidAdmission::try_from(&bootstrap.admission)
         .map_err(|message| format!("invalid bootstrap admission: {message}"))?;
@@ -464,13 +479,23 @@ pub fn run(bootstrap: NexusBootstrap) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let meta = Arc::clone(&listeners);
-    let meta_answering = MetaDispatcher {
+    let meta_answering = Arc::new(MetaDispatcher {
         belief: belief.clone(),
-    };
+    });
+    let meta_runtime = runtime.handle().clone();
     std::thread::spawn(move || loop {
-        if let Err(error) = meta.serve_next_meta(&meta_answering) {
-            eprintln!("Belief Nexus meta listener failed permanently: {error}");
-            std::process::exit(1);
+        match meta.accept_meta() {
+            Ok(stream) => {
+                meta_runtime.spawn(MetaConnection::serve(
+                    stream,
+                    Arc::clone(&meta_answering),
+                    meta.admission(),
+                ));
+            }
+            Err(error) => {
+                eprintln!("Belief Nexus meta listener failed permanently: {error}");
+                std::process::exit(1);
+            }
         }
     });
     let polled = belief.clone();
