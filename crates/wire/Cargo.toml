@@ -1,0 +1,31 @@
+[package]
+name = "belief-nexus-wire"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+publish = false
+
+[features]
+default = []
+datom = [
+  "dep:datom-codec",
+  "dep:protos",
+  "signal-belief-nexus/datom",
+  "meta-signal-belief-nexus/datom",
+  "shared-translator/datom",
+  "nexus-exchange/datom",
+]
+
+[dependencies]
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526", optional = true }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598", optional = true }
+rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+signal.workspace = true
+signal-belief-nexus.workspace = true
+meta-signal-belief-nexus.workspace = true
+shared-translator.workspace = true
+nexus-exchange.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

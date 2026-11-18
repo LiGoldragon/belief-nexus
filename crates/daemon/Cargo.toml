@@ -1,7 +1,8 @@
 [package]
 name = "belief-nexus-daemon"
-version = "0.2.0"
-edition = "2021"
+version = "1.0.0"
+edition.workspace = true
+rust-version.workspace = true
 license = "MIT"
 
 [lib]
@@ -9,18 +10,27 @@ path = "src/lib.rs"
 
 [dependencies]
 belief-nexus-core = { path = "../core" }
+belief-nexus-wire = { path = "../wire" }
 emission-belief-nexus = { path = "../emission" }
-meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "eb43351" }
-nix = { version = "0.30", features = ["socket", "user"] }
+meta-signal-belief-nexus.workspace = true
+signal-belief-nexus.workspace = true
+signal.workspace = true
+nexus-exchange.workspace = true
+nexus-serving.workspace = true
+translator.workspace = true
+kameo.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+futures-util = { workspace = true }
+nix = { version = "0.30", features = ["fs", "socket", "user"] }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
-signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
-signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "011eea2" }
-translator = { git = "https://github.com/LiGoldragon/translator", rev = "abc89b9", features = ["unix"] }
 
 [dev-dependencies]
+nexus-querying.workspace = true
 tempfile = "3"
-belief-nexus-translator = { path = "../translator" }
+
+[lints.rust]
+unsafe_code = "forbid"
 
 [lints.clippy]
-# wire::Response is the contract's own reply, returned whole.
+# wire::Output is the contract's own reply, returned whole.
 result_large_err = "allow"

@@ -1,0 +1,10 @@
+Signal
+[ shared_translator:[ Caller ]                         ; imports
+  meta_signal_belief_nexus:Query.Input
+  meta_signal_belief_nexus:[ TranslatorConfiguration ] ]
+[ Call.{ Caller Query }                                ; inputs: a meta query with the Caller it came from
+  RestoreTranslatorConfiguration ]                     ;   or the translator's own settings, restored
+[ Answered.meta_signal_belief_nexus:Output             ; outputs
+  Restored.TranslatorConfiguration
+  Failed.String ]
+[]                                                     ; types

@@ -2,9 +2,14 @@
 //!
 //! Transports supply peer-bound callers and typed values. This crate owns
 //! authorization, Memory ordering, source polling, publication recovery and
-//! repeat-identifiable subscriptions.
+//! repeat-identifiable subscriptions. Its sockets are served by the serving
+//! every Nexus shares (`nexus-serving`), in [`server`].
 
 use belief_nexus_core::{BeliefCore, PublicationContext, RecoveryOutcome, ResolveError, SnapshotChange};
+pub use belief_nexus_wire::meta_call::Call_Data as MetaCall;
+pub use belief_nexus_wire::public_call::Call_Data as PublicCall;
+use belief_nexus_wire::meta_call;
+use belief_nexus_wire::transport::NexusBootstrap;
 use emission_belief_nexus as emission;
 use meta_signal_belief_nexus as meta;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -20,9 +25,13 @@ use std::{
 pub mod memory_files;
 pub mod server;
 
+/// One frame of a subscription: the owner's furnished workspaces when it
+/// opens, then each furnishing.
+pub type Frame = signal::Frame<wire::Workspaces, wire::Furnishing>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DaemonBootstrap {
-    pub nexus: meta::NexusBootstrap,
+    pub nexus: NexusBootstrap,
 }
 
 fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
@@ -66,14 +75,9 @@ fn rebuild_core(memory: &MemoryImage) -> Result<BeliefCore, ()> {
     Ok(core)
 }
 
-fn validate_bootstrap(value: &meta::NexusBootstrap) -> Result<(), BootstrapError> {
-    if value.ordinary_socket.0 .0 == value.meta_socket.0 .0
-        || value.ordinary_socket.0 .0 == value.emission_translator_socket.0 .0
-        || value.meta_socket.0 .0 == value.emission_translator_socket.0 .0
-    {
-        return Err(BootstrapError::SocketCollision);
-    }
-    meta::Admitting::admitted(value).map_err(|_| BootstrapError::InvalidAdmission)?;
+fn validate_bootstrap(value: &NexusBootstrap) -> Result<(), BootstrapError> {
+    belief_nexus_wire::ValidAdmission::try_from(&value.admission)
+        .map_err(|_| BootstrapError::InvalidAdmission)?;
     Ok(())
 }
 
@@ -132,13 +136,13 @@ fn setting_owner(set: &meta::Set) -> meta::Keeper {
     }
 }
 
-fn emission_mismatch(query: &emission::Query) -> emission::Response {
+fn emission_mismatch(query: &emission::Input) -> emission::Output {
     let diagnostic = wire::Diagnostic { executable_path: wire::ExecutablePath(String::new()), exit_status_option: None, string: "emission outcome configuration revision mismatch".into() };
     match query {
-        emission::Query::Snapshot(repository) => emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal { repository: repository.clone(), source_operation: emission::SourceOperation::ReadingMain, source_evidence: emission::SourceEvidence::Translator(diagnostic) })),
-        emission::Query::Publish(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::StagingGeneration, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
-        emission::Query::InspectPublication(value) => emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::InspectingPointer, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
-        emission::Query::Clean(value) => emission::Response::CleanupRefused(wire::FileFailure { workspace: value.workspace.clone(), file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::Translator(diagnostic) }),
+        emission::Input::Snapshot(repository) => emission::Output::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal { repository: repository.clone(), source_operation: emission::SourceOperation::ReadingMain, source_evidence: emission::SourceEvidence::Translator(diagnostic) })),
+        emission::Input::Publish(value) => emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::StagingGeneration, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
+        emission::Input::InspectPublication(value) => emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal { workspace: value.workspace.clone(), publication_operation: emission::PublicationOperation::InspectingPointer, publication_evidence: emission::PublicationEvidence::Translator(diagnostic) })),
+        emission::Input::Clean(value) => emission::Output::CleanupRefused(wire::FileFailure { workspace: value.workspace.clone(), file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::Translator(diagnostic) }),
     }
 }
 
@@ -267,8 +271,8 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEffects {
-        replies: VecDeque<emission::Response>,
-        calls: Vec<emission::Query>,
+        replies: VecDeque<emission::Output>,
+        calls: Vec<emission::Input>,
         publish_from_query: bool,
         cleanup_failures: usize,
     }
@@ -276,28 +280,28 @@ mod tests {
     impl EmissionPort for FakeEffects {
         fn emit(&mut self, attempt: emission::EmissionAttempt) -> emission::EmissionAttemptOutcome {
             let revision = attempt.configuration_revision;
-            let query = attempt.query;
+            let query = attempt.input;
             self.calls.push(query.clone());
             let response = if let Some(reply) = self.replies.pop_front() {
                 reply
             } else {
                 match query {
-                    emission::Query::Publish(publication) if self.publish_from_query => emission::Response::Published(emission::PublicationState {
+                    emission::Input::Publish(publication) if self.publish_from_query => emission::Output::Published(emission::PublicationState {
                         workspace: publication.workspace,
                         publication_identity: emission::PublicationIdentity {
                             generation_id: publication.generation_id,
                             publication_revision: publication.intended_publication.0,
                         },
                     }),
-                    emission::Query::Clean(request) if self.cleanup_failures > 0 => {
+                    emission::Input::Clean(request) if self.cleanup_failures > 0 => {
                         self.cleanup_failures -= 1;
-                        emission::Response::CleanupRefused(wire::FileFailure { workspace: request.workspace, file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::PermissionDenied })
+                        emission::Output::CleanupRefused(wire::FileFailure { workspace: request.workspace, file_operation: wire::FileOperation::Cleaning, file_evidence: wire::FileEvidence::PermissionDenied })
                     }
-                    emission::Query::Clean(request) => emission::Response::Cleaned(emission::CleanupState { workspace: request.workspace, publication_identity: request.publication_identity, cleanup_outcome: emission::CleanupOutcome::Removed }),
+                    emission::Input::Clean(request) => emission::Output::Cleaned(emission::CleanupState { workspace: request.workspace, publication_identity: request.publication_identity, cleanup_outcome: emission::CleanupOutcome::Removed }),
                     _ => panic!("missing effect reply"),
                 }
             };
-            emission::EmissionAttemptOutcome { configuration_revision: revision, response }
+            emission::EmissionAttemptOutcome { configuration_revision: revision, output: response }
         }
     }
 
@@ -351,28 +355,23 @@ mod tests {
 
     fn bootstrap() -> DaemonBootstrap {
         DaemonBootstrap {
-            nexus: meta::NexusBootstrap {
-                ordinary_socket: meta::OrdinarySocket(meta::SocketPath("/run/ordinary".into())),
-                meta_socket: meta::MetaSocket(meta::SocketPath("/run/meta".into())),
-                emission_translator_socket: meta::EmissionTranslatorSocket(meta::SocketPath(
-                    "/run/translator".into(),
-                )),
+            nexus: NexusBootstrap {
                 place: translator::Place {
                     place_name: translator::PlaceName("unit".into()),
                     runtime: translator::Runtime("/run".into()),
                     state: translator::State("/unused".into()),
                 },
-                memory_file_name: meta::MemoryFileName("memory".into()),
-                admission: meta::Admission {
-                    byte_limit: meta::ByteLimit(1_000_000),
-                    timeout: meta::Timeout(5_000),
+                admission: nexus_exchange::Admission {
+                    frame_deadline_milliseconds: nexus_exchange::FrameDeadlineMilliseconds(5_000),
+                    frame_capacity_bytes: nexus_exchange::FrameCapacityBytes(1_000_000),
+                    retry_delay_milliseconds: nexus_exchange::RetryDelayMilliseconds(25),
                 },
-                paired_translator: meta::PairedTranslator {
+                peer_identity: translator::PeerIdentity {
                     user_id: translator::UserId(1000),
-                    group_id: translator::GroupId(1000),
                     process_id: translator::ProcessId(44),
                 },
-                bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(translator::UserId(1000))),
+                owner: wire::Owner::Login(translator::UserId(1000)),
+                memory_file_name: belief_nexus_wire::transport::MemoryFileName("memory".into()),
             },
         }
     }
@@ -517,18 +516,18 @@ mod tests {
     }
 
     fn register(daemon: &mut Daemon<FakeEffects, FakeMemory>) {
-        let response = daemon.handle(wire::Call {
+        let response = daemon.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Register(repository()),
+            query: wire::Input::Register(repository()),
         });
-        assert!(matches!(response, wire::Response::Registered(_)));
+        assert!(matches!(response, wire::Output::Registered(_)));
     }
 
     fn published_after_snapshot(
         daemon: &Daemon<FakeEffects, FakeMemory>,
         next: &emission::SourceSnapshot,
         workspace: &wire::Workspace,
-    ) -> emission::Response {
+    ) -> emission::Output {
         let stored = daemon.workspace(workspace).unwrap();
         let mut core = rebuild_core(&daemon.memory).unwrap();
         core.observe(next.clone().into()).unwrap();
@@ -540,7 +539,7 @@ mod tests {
             layout: stored.layout.clone(),
             retention_policy: stored.retention.clone(),
         }).unwrap();
-        emission::Response::Published(emission::PublicationState {
+        emission::Output::Published(emission::PublicationState {
             workspace: workspace.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: publication.generation_id,
@@ -553,34 +552,34 @@ mod tests {
     fn login_owner_survives_cli_pid_changes_and_meta_rejects_other_login() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ].into(),
             publish_from_query: true,
             ..Default::default()
         };
         let memory = FakeMemory { image: Some(ready_memory()), ..Default::default() };
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
-        let registered = daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(repository()) });
-        assert!(matches!(registered, wire::Response::Registered(_)));
+        let registered = daemon.handle(PublicCall { caller: caller(), query: wire::Input::Register(repository()) });
+        assert!(matches!(registered, wire::Output::Registered(_)));
         let second = translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(999) };
-        let furnished = daemon.handle(wire::Call { caller: second.clone(), query: wire::Query::Furnish(furnish_request()) });
-        assert!(matches!(furnished, wire::Response::Furnished(_)), "same login lost ownership: {furnished:?}");
+        let furnished = daemon.handle(PublicCall { caller: second.clone(), query: wire::Input::Furnish(furnish_request()) });
+        assert!(matches!(furnished, wire::Output::Furnished(_)), "same login lost ownership: {furnished:?}");
 
         let current = daemon.memory.configuration.revision;
-        let configured = daemon.configure(meta::MetaCall { caller: second, query: meta::Query::Configure(meta::ConfigureRequest {
+        let configured = daemon.configure(MetaCall { caller: second, query: meta::Input::Configure(meta::ConfigureRequest {
             configuration_revision_option: Some(current), set: meta::Set::RepositoryPolling(meta::Timeout(200)),
         }) });
-        assert!(matches!(configured, meta::Response::Configured(_)));
-        let unconditional = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(1001) }, query: meta::Query::Configure(meta::ConfigureRequest {
+        assert!(matches!(configured, meta::Output::Configured(_)));
+        let unconditional = daemon.configure(MetaCall { caller: translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(1001) }, query: meta::Input::Configure(meta::ConfigureRequest {
             configuration_revision_option: None, set: meta::Set::RepositoryPolling(meta::Timeout(250)),
         }) });
         let expected_revision = daemon.memory.configuration.revision;
-        assert!(matches!(unconditional, meta::Response::Configured(meta::ConfiguredState { configuration_revision, .. }) if configuration_revision == expected_revision));
-        let refused = daemon.configure(meta::MetaCall { caller: translator::Caller { user_id: translator::UserId(2000), process_id: translator::ProcessId(999) }, query: meta::Query::Configure(meta::ConfigureRequest {
+        assert!(matches!(unconditional, meta::Output::Configured(meta::ConfiguredState { configuration_revision, .. }) if configuration_revision == expected_revision));
+        let refused = daemon.configure(MetaCall { caller: translator::Caller { user_id: translator::UserId(2000), process_id: translator::ProcessId(999) }, query: meta::Input::Configure(meta::ConfigureRequest {
             configuration_revision_option: Some(daemon.memory.configuration.revision), set: meta::Set::RepositoryPolling(meta::Timeout(300)),
         }) });
-        assert!(matches!(refused, meta::Response::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(_))));
+        assert!(matches!(refused, meta::Output::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(_))));
     }
 
     #[test]
@@ -591,15 +590,15 @@ mod tests {
         let memory = FakeMemory { image: Some(image), ..Default::default() };
         let mut daemon = Daemon::start(bootstrap(), FakeEffects::default(), memory).unwrap();
 
-        let response = daemon.configure(meta::MetaCall {
+        let response = daemon.configure(MetaCall {
             caller: caller(),
-            query: meta::Query::Configure(meta::ConfigureRequest {
+            query: meta::Input::Configure(meta::ConfigureRequest {
                 configuration_revision_option: Some(meta::ConfigurationRevision(i64::MAX)),
                 set: meta::Set::RepositoryPolling(meta::Timeout(200)),
             }),
         });
 
-        assert!(matches!(response, meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable)));
+        assert!(matches!(response, meta::Output::ConfigureRefused(meta::ConfigurationRefusal::Unavailable)));
         assert_eq!(daemon.memory, expected);
         assert_eq!(daemon.store.image, Some(expected));
         assert_eq!(daemon.store.stores, 0);
@@ -612,18 +611,18 @@ mod tests {
         image.configuration.ordinary_peers.as_mut().unwrap().0.push(peer_two);
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ].into(), ..Default::default()
         };
         let memory = FakeMemory { image: Some(image), ..Default::default() };
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
         let first = wire::Owner::Peer(translator::PeerId("client".into()));
-        let registered = daemon.handle_as(wire::Call { caller: caller(), query: wire::Query::Register(repository()) }, first);
-        assert!(matches!(registered, wire::Response::Registered(_)));
+        let registered = daemon.handle_as(PublicCall { caller: caller(), query: wire::Input::Register(repository()) }, first);
+        assert!(matches!(registered, wire::Output::Registered(_)));
         let second_caller = translator::Caller { user_id: translator::UserId(1000), process_id: translator::ProcessId(55) };
-        let response = daemon.handle_as(wire::Call { caller: second_caller, query: wire::Query::Resolve(vec![module()]) }, wire::Owner::Peer(translator::PeerId("other".into())));
-        assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotAuthorized(_))));
+        let response = daemon.handle_as(PublicCall { caller: second_caller, query: wire::Input::Resolve(vec![module()]) }, wire::Owner::Peer(translator::PeerId("other".into())));
+        assert!(matches!(response, wire::Output::Refused(wire::Refusal::NotAuthorized(_))));
     }
 
     #[test]
@@ -692,8 +691,8 @@ mod tests {
     fn register_observes_main_again_before_returning() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("two", "two")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("two", "two")),
             ]
             .into(),
             ..Default::default()
@@ -703,12 +702,12 @@ mod tests {
             ..Default::default()
         };
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
-        let response = daemon.handle(wire::Call {
+        let response = daemon.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Register(repository()),
+            query: wire::Input::Register(repository()),
         });
         assert!(
-            matches!(response, wire::Response::Registered(wire::RepositoryState { source_revision: wire::SourceRevision(ref value), .. }) if value == "two")
+            matches!(response, wire::Output::Registered(wire::RepositoryState { source_revision: wire::SourceRevision(ref value), .. }) if value == "two")
         );
         assert_eq!(
             daemon.memory.repositories[0].snapshot.source_revision,
@@ -719,7 +718,7 @@ mod tests {
     #[test]
     fn register_rejects_a_snapshot_for_an_unrequested_repository_before_mutation() {
         let effects = FakeEffects {
-            replies: [emission::Response::Snapshotted(other_snapshot("one", "other"))].into(),
+            replies: [emission::Output::Snapshotted(other_snapshot("one", "other"))].into(),
             ..Default::default()
         };
         let initial = ready_memory();
@@ -729,30 +728,30 @@ mod tests {
         };
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
 
-        let response = daemon.handle(wire::Call {
+        let response = daemon.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Register(repository()),
+            query: wire::Input::Register(repository()),
         });
 
-        assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotReady)));
+        assert!(matches!(response, wire::Output::Refused(wire::Refusal::NotReady)));
         assert_eq!(daemon.memory, initial);
         assert_eq!(daemon.store.stores, 0);
-        assert_eq!(daemon.effects.calls, vec![emission::Query::Snapshot(repository())]);
+        assert_eq!(daemon.effects.calls, vec![emission::Input::Snapshot(repository())]);
     }
 
     #[test]
     fn register_refusals_are_bound_to_the_requested_repository() {
-        let wrong_repository = emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+        let wrong_repository = emission::Output::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
             repository: other_repository(),
             source_operation: emission::SourceOperation::ReadingMain,
             source_evidence: emission::SourceEvidence::MainUnavailable,
         }));
-        let wrong_variant = emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
+        let wrong_variant = emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace: workspace(),
             publication_operation: emission::PublicationOperation::StagingGeneration,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
         }));
-        let matching = emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+        let matching = emission::Output::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
             repository: repository(),
             source_operation: emission::SourceOperation::ReadingMain,
             source_evidence: emission::SourceEvidence::MainUnavailable,
@@ -767,19 +766,19 @@ mod tests {
                 FakeMemory { image: Some(initial.clone()), ..Default::default() },
             ).unwrap();
 
-            let response = daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(repository()) });
+            let response = daemon.handle(PublicCall { caller: caller(), query: wire::Input::Register(repository()) });
 
             if matches_request {
                 assert!(matches!(
                     response,
-                    wire::Response::Refused(wire::Refusal::Source(wire::SourceFailure {
+                    wire::Output::Refused(wire::Refusal::Source(wire::SourceFailure {
                         repository: failed_repository,
                         source_operation: wire::SourceOperation::Snapshotting,
                         source_evidence: wire::SourceEvidence::MainUnavailable,
                     })) if failed_repository == repository()
                 ));
             } else {
-                assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotReady)));
+                assert!(matches!(response, wire::Output::Refused(wire::Refusal::NotReady)));
             }
             assert_eq!(daemon.memory, initial);
             assert_eq!(daemon.store.image, Some(initial));
@@ -793,8 +792,8 @@ mod tests {
     fn register_handoff_ignores_a_snapshot_for_another_repository() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(other_snapshot("two", "other")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(other_snapshot("two", "other")),
             ]
             .into(),
             ..Default::default()
@@ -805,14 +804,14 @@ mod tests {
         };
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
 
-        let response = daemon.handle(wire::Call {
+        let response = daemon.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Register(repository()),
+            query: wire::Input::Register(repository()),
         });
 
         assert!(matches!(
             response,
-            wire::Response::Registered(wire::RepositoryState {
+            wire::Output::Registered(wire::RepositoryState {
                 repository: ref value,
                 source_revision: wire::SourceRevision(ref revision),
             }) if value == &repository() && revision == "one"
@@ -829,8 +828,8 @@ mod tests {
             bootstrap(),
             FakeEffects {
                 replies: [
-                    emission::Response::Snapshotted(snapshot("one", "one")),
-                    emission::Response::Snapshotted(snapshot("one", "one")),
+                    emission::Output::Snapshotted(snapshot("one", "one")),
+                    emission::Output::Snapshotted(snapshot("one", "one")),
                 ].into(),
                 publish_from_query: true,
                 ..Default::default()
@@ -839,21 +838,21 @@ mod tests {
         ).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let events = daemon.events.len();
         let next = snapshot("two", "two");
         let published = published_after_snapshot(&daemon, &next, &workspace());
         daemon.effects.replies.extend([
-            emission::Response::Snapshotted(next.clone()),
+            emission::Output::Snapshotted(next.clone()),
             published,
-            emission::Response::Snapshotted(next.clone()),
+            emission::Output::Snapshotted(next.clone()),
         ]);
 
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(repository()) }),
-            wire::Response::Registered(wire::RepositoryState { source_revision: wire::SourceRevision(ref revision), .. })
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Register(repository()) }),
+            wire::Output::Registered(wire::RepositoryState { source_revision: wire::SourceRevision(ref revision), .. })
                 if revision == "two"
         ));
         let stored = daemon.workspace(&workspace()).unwrap();
@@ -865,13 +864,13 @@ mod tests {
         }]);
         assert!(matches!(
             daemon.events.get(events..),
-            Some([Event { response: wire::Response::Changed(wire::FurnishedWorkspace {
+            Some([Event { frame: Frame::Changed(wire::Furnishing::Furnished(wire::FurnishedWorkspace {
                 publication_revision: wire::PublicationRevision(2),
                 ..
-            }), .. }])
+            })), .. }])
         ));
 
-        daemon.effects.replies.push_back(emission::Response::Snapshotted(next));
+        daemon.effects.replies.push_back(emission::Output::Snapshotted(next));
         assert!(daemon.poll_once().is_empty());
         assert_eq!(daemon.workspace(&workspace()).unwrap().successful.as_ref().unwrap().publication_revision, wire::PublicationRevision(2));
     }
@@ -882,8 +881,8 @@ mod tests {
             bootstrap(),
             FakeEffects {
                 replies: [
-                    emission::Response::Snapshotted(snapshot("one", "one")),
-                    emission::Response::Snapshotted(snapshot("one", "one")),
+                    emission::Output::Snapshotted(snapshot("one", "one")),
+                    emission::Output::Snapshotted(snapshot("one", "one")),
                 ].into(),
                 publish_from_query: true,
                 ..Default::default()
@@ -892,35 +891,35 @@ mod tests {
         ).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let prior = daemon.workspace(&workspace()).unwrap().successful.clone().unwrap();
         let events = daemon.events.len();
         let next = snapshot("two", "two");
         daemon.effects.replies.extend([
-            emission::Response::Snapshotted(next.clone()),
-            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
+            emission::Output::Snapshotted(next.clone()),
+            emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
             })),
-            emission::Response::Snapshotted(next),
+            emission::Output::Snapshotted(next),
         ]);
 
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(repository()) }),
-            wire::Response::Registered(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Register(repository()) }),
+            wire::Output::Registered(_)
         ));
         let stored = daemon.workspace(&workspace()).unwrap();
         assert_eq!(stored.successful, Some(prior));
         assert!(stored.pending.is_some());
         assert!(matches!(
             daemon.events.get(events..),
-            Some([Event { response: wire::Response::RefurnishFailed(wire::RefurnishFailure {
+            Some([Event { frame: Frame::Changed(wire::Furnishing::RefurnishFailed(wire::RefurnishFailure {
                 workspace: failed_workspace,
                 refusal_kind: wire::RefusalKind::File,
-            }), .. }]) if failed_workspace == &workspace()
+            })), .. }]) if failed_workspace == &workspace()
         ));
     }
 
@@ -930,8 +929,8 @@ mod tests {
             bootstrap(),
             FakeEffects {
                 replies: [
-                    emission::Response::Snapshotted(snapshot("one", "one")),
-                    emission::Response::Snapshotted(snapshot("one", "one")),
+                    emission::Output::Snapshotted(snapshot("one", "one")),
+                    emission::Output::Snapshotted(snapshot("one", "one")),
                 ].into(),
                 publish_from_query: true,
                 ..Default::default()
@@ -940,18 +939,18 @@ mod tests {
         ).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let before = daemon.memory.clone();
         let stores = daemon.store.stores;
-        let publishes = daemon.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count();
+        let publishes = daemon.effects.calls.iter().filter(|query| matches!(query, emission::Input::Publish(_))).count();
         daemon.store.fail_at = Some(stores + 1);
-        daemon.effects.replies.push_back(emission::Response::Snapshotted(snapshot("two", "two")));
+        daemon.effects.replies.push_back(emission::Output::Snapshotted(snapshot("two", "two")));
 
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(repository()) }),
-            wire::Response::Refused(wire::Refusal::Memory(wire::MemoryFailure {
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Register(repository()) }),
+            wire::Output::Refused(wire::Refusal::Memory(wire::MemoryFailure {
                 memory_operation: wire::MemoryOperation::Recording,
                 ..
             }))
@@ -959,7 +958,7 @@ mod tests {
         assert_eq!(daemon.memory, before);
         assert_eq!(daemon.store.image, Some(before));
         assert_eq!(daemon.store.stores, stores + 1);
-        assert_eq!(daemon.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(), publishes);
+        assert_eq!(daemon.effects.calls.iter().filter(|query| matches!(query, emission::Input::Publish(_))).count(), publishes);
         assert_eq!(daemon.core.resolve(&[module()]).unwrap().found.0, vec![module()]);
     }
 
@@ -967,8 +966,8 @@ mod tests {
     fn pending_is_durable_before_publish_and_post_pointer_failure_keeps_it() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -981,13 +980,13 @@ mod tests {
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
         register(&mut daemon);
         daemon.store.fail_at = Some(daemon.store.stores + 2);
-        let response = daemon.handle(wire::Call {
+        let response = daemon.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Furnish(furnish_request()),
+            query: wire::Input::Furnish(furnish_request()),
         });
         assert!(matches!(
             response,
-            wire::Response::MemoryAfterPublication(_)
+            wire::Output::MemoryAfterPublication(_)
         ));
         assert!(daemon.memory.workspaces[0].pending.is_some());
         assert!(daemon.store.image.as_ref().unwrap().workspaces[0]
@@ -999,8 +998,8 @@ mod tests {
     fn exact_pending_recovers_after_restart() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1013,9 +1012,9 @@ mod tests {
         let mut first = Daemon::start(bootstrap(), effects, memory).unwrap();
         register(&mut first);
         first.store.fail_at = Some(first.store.stores + 2);
-        first.handle(wire::Call {
+        first.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Furnish(furnish_request()),
+            query: wire::Input::Furnish(furnish_request()),
         });
         let durable = first.store.image.clone().unwrap();
         let pending = durable.workspaces[0].pending.clone().unwrap();
@@ -1034,7 +1033,7 @@ mod tests {
             }),
         };
         let effects = FakeEffects {
-            replies: [emission::Response::Inspected(inspection)].into(),
+            replies: [emission::Output::Inspected(inspection)].into(),
             ..Default::default()
         };
         let memory = FakeMemory {
@@ -1045,7 +1044,7 @@ mod tests {
         assert!(second.memory.workspaces[0].pending.is_none());
         assert!(second.memory.workspaces[0].successful.is_some());
         assert!(second.effects.calls.iter().all(|query| {
-            !matches!(query, emission::Query::Publish(_))
+            !matches!(query, emission::Input::Publish(_))
         }));
     }
 
@@ -1053,8 +1052,8 @@ mod tests {
     fn startup_reconciles_the_source_commit_crash_window() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1064,14 +1063,14 @@ mod tests {
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let old = daemon.memory.workspaces[0].successful.clone().unwrap();
         let committed = Arc::new(Mutex::new(None));
         daemon.store.committed = Some(committed.clone());
         daemon.store.commit_then_panic_at = Some(daemon.store.stores + 1);
-        daemon.effects.replies.push_back(emission::Response::Snapshotted(snapshot("two", "two")));
+        daemon.effects.replies.push_back(emission::Output::Snapshotted(snapshot("two", "two")));
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| daemon.poll_once()));
         assert!(panic.is_err(), "fixture must stop after the newer source snapshot is durable");
 
@@ -1092,7 +1091,7 @@ mod tests {
         assert_eq!(recovered.publication_revision, wire::PublicationRevision(2));
         assert!(restarted.memory.workspaces[0].pending.is_none());
         assert_eq!(
-            restarted.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
+            restarted.effects.calls.iter().filter(|query| matches!(query, emission::Input::Publish(_))).count(),
             1
         );
     }
@@ -1101,8 +1100,8 @@ mod tests {
     fn startup_reconciles_each_affected_workspace_once() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1117,8 +1116,8 @@ mod tests {
         register(&mut daemon);
         for name in ["first", "second"] {
             assert!(matches!(
-                daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named(name)) }),
-                wire::Response::Furnished(_)
+                daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named(name)) }),
+                wire::Output::Furnished(_)
             ));
         }
         let mut durable = daemon.memory.clone();
@@ -1131,7 +1130,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            restarted.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
+            restarted.effects.calls.iter().filter(|query| matches!(query, emission::Input::Publish(_))).count(),
             2
         );
         assert!(restarted.memory.workspaces.iter().all(|workspace| {
@@ -1144,8 +1143,8 @@ mod tests {
     fn ambiguous_settled_workspace_starts_and_preserves_its_success() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1159,8 +1158,8 @@ mod tests {
         .unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let prior = daemon.memory.workspaces[0].successful.clone().unwrap();
         let mut durable = daemon.memory.clone();
@@ -1178,18 +1177,18 @@ mod tests {
         assert_eq!(restarted.memory.workspaces[0].successful, Some(prior));
         assert!(restarted.memory.workspaces[0].pending.is_none());
         assert!(restarted.events.iter().any(|event| matches!(
-            event.response,
-            wire::Response::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Source, .. })
+            event.frame,
+            Frame::Changed(wire::Furnishing::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Source, .. }))
         )));
-        assert!(restarted.effects.calls.iter().all(|query| !matches!(query, emission::Query::Publish(_))));
+        assert!(restarted.effects.calls.iter().all(|query| !matches!(query, emission::Input::Publish(_))));
     }
 
     #[test]
     fn startup_retry_memory_failure_is_typed_and_the_next_restart_retries() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1203,8 +1202,8 @@ mod tests {
         .unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let prior = daemon.memory.workspaces[0].successful.clone().unwrap();
         let mut durable = daemon.memory.clone();
@@ -1219,10 +1218,10 @@ mod tests {
         assert_eq!(failed.memory.workspaces[0].successful, Some(prior));
         assert!(failed.memory.workspaces[0].pending.is_none());
         assert!(failed.events.iter().any(|event| matches!(
-            event.response,
-            wire::Response::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Memory, .. })
+            event.frame,
+            Frame::Changed(wire::Furnishing::RefurnishFailed(wire::RefurnishFailure { refusal_kind: wire::RefusalKind::Memory, .. }))
         )));
-        assert!(failed.effects.calls.iter().all(|query| !matches!(query, emission::Query::Publish(_))));
+        assert!(failed.effects.calls.iter().all(|query| !matches!(query, emission::Input::Publish(_))));
 
         let durable = failed.store.image.clone().unwrap();
         let recovered = Daemon::start(
@@ -1232,7 +1231,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            recovered.effects.calls.iter().filter(|query| matches!(query, emission::Query::Publish(_))).count(),
+            recovered.effects.calls.iter().filter(|query| matches!(query, emission::Input::Publish(_))).count(),
             1
         );
         assert!(recovered.memory.workspaces[0].pending.is_none());
@@ -1246,8 +1245,8 @@ mod tests {
     fn current_successful_basis_is_quiet_on_startup() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1261,8 +1260,8 @@ mod tests {
         .unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
 
         let restarted = Daemon::start(
@@ -1279,9 +1278,9 @@ mod tests {
     fn unchanged_watch_is_quiet_and_subscriber_capacity_counts_active() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             ..Default::default()
@@ -1328,7 +1327,7 @@ mod tests {
         assert!(daemon.subscribers.is_empty());
         assert_eq!(daemon.store.stores, 0);
 
-        daemon.event(owner, wire::Response::Subscribed(Vec::new()));
+        daemon.event(owner, Frame::Opened(wire::Workspaces(Vec::new())));
         assert_eq!(daemon.memory, expected);
         assert!(daemon.events.is_empty());
         assert_eq!(daemon.store.stores, 0);
@@ -1440,8 +1439,8 @@ mod tests {
     fn changed_watch_announces_only_successful_publication() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1454,19 +1453,19 @@ mod tests {
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call {
+            daemon.handle(PublicCall {
                 caller: caller(),
-                query: wire::Query::Furnish(furnish_request()),
+                query: wire::Input::Furnish(furnish_request()),
             }),
-            wire::Response::Furnished(_)
+            wire::Output::Furnished(_)
         ));
         daemon
             .effects
             .replies
-            .push_back(emission::Response::Snapshotted(snapshot("two", "two")));
+            .push_back(emission::Output::Snapshotted(snapshot("two", "two")));
         let events = daemon.poll_once();
         assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0].response, wire::Response::Changed(_)));
+        assert!(matches!(&events[0].frame, Frame::Changed(wire::Furnishing::Furnished(_))));
         assert_eq!(
             daemon.memory.repositories[0].snapshot.source_revision,
             wire::SourceRevision("two".into())
@@ -1477,10 +1476,10 @@ mod tests {
     fn watch_mismatch_preserves_every_repository_and_workspace() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
-                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(other_snapshot("other-one", "other")),
+                emission::Output::Snapshotted(other_snapshot("other-one", "other")),
             ]
             .into(),
             publish_from_query: true,
@@ -1493,25 +1492,25 @@ mod tests {
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call {
+            daemon.handle(PublicCall {
                 caller: caller(),
-                query: wire::Query::Register(other_repository()),
+                query: wire::Input::Register(other_repository()),
             }),
-            wire::Response::Registered(_)
+            wire::Output::Registered(_)
         ));
         assert!(matches!(
-            daemon.handle(wire::Call {
+            daemon.handle(PublicCall {
                 caller: caller(),
-                query: wire::Query::Furnish(furnish_request()),
+                query: wire::Input::Furnish(furnish_request()),
             }),
-            wire::Response::Furnished(_)
+            wire::Output::Furnished(_)
         ));
         let before = daemon.memory.clone();
         let stores = daemon.store.stores;
 
         daemon.effects.replies.extend([
-            emission::Response::Snapshotted(other_snapshot("other-two", "malformed")),
-            emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+            emission::Output::Snapshotted(other_snapshot("other-two", "malformed")),
+            emission::Output::Snapshotted(other_snapshot("other-one", "other")),
         ]);
         assert!(daemon.poll_once().is_empty());
         assert_eq!(daemon.memory, before);
@@ -1526,10 +1525,10 @@ mod tests {
     fn watch_refusals_are_bound_to_the_requested_repository() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
-                emission::Response::Snapshotted(other_snapshot("other-one", "other")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(other_snapshot("other-one", "other")),
+                emission::Output::Snapshotted(other_snapshot("other-one", "other")),
             ].into(),
             publish_from_query: true,
             ..Default::default()
@@ -1541,26 +1540,26 @@ mod tests {
         ).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Register(other_repository()) }),
-            wire::Response::Registered(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Register(other_repository()) }),
+            wire::Output::Registered(_)
         ));
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let before = daemon.memory.clone();
         let stores = daemon.store.stores;
         let requested = daemon.core.requested(&workspace()).map(<[_]>::to_vec);
         let retry = daemon.core.retry_workspaces();
         let resolution = daemon.core.resolve(&[module()]).unwrap();
-        let unchanged_other = || emission::Response::Snapshotted(other_snapshot("other-one", "other"));
+        let unchanged_other = || emission::Output::Snapshotted(other_snapshot("other-one", "other"));
         let malformed = [
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+            emission::Output::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
                 repository: other_repository(),
                 source_operation: emission::SourceOperation::ReadingMain,
                 source_evidence: emission::SourceEvidence::MainUnavailable,
             })),
-            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
+            emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1582,7 +1581,7 @@ mod tests {
         }
 
         daemon.effects.replies.extend([
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+            emission::Output::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
                 repository: repository(),
                 source_operation: emission::SourceOperation::ReadingTree,
                 source_evidence: emission::SourceEvidence::MainUnavailable,
@@ -1619,8 +1618,8 @@ mod tests {
         });
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1643,10 +1642,10 @@ mod tests {
         ] {
             assert!(matches!(
                 daemon.handle_as(
-                    wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named(name)) },
+                    PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named(name)) },
                     owner,
                 ),
-                wire::Response::Furnished(_)
+                wire::Output::Furnished(_)
             ));
         }
 
@@ -1655,27 +1654,27 @@ mod tests {
         let login = daemon.subscribe(login_owner.clone()).unwrap();
         for (subscription, expected) in [(&first, "first"), (&second, "second"), (&login, "login")] {
             assert!(matches!(
-                &subscription.initial.response,
-                wire::Response::Subscribed(values)
+                &subscription.initial.frame,
+                Frame::Opened(wire::Workspaces(values))
                     if values.len() == 1 && values[0].workspace == workspace_named(expected)
             ));
         }
 
         assert!(matches!(
             daemon.handle_as(
-                wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("first")) },
+                PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named("first")) },
                 first_owner.clone(),
             ),
-            wire::Response::Furnished(_)
+            wire::Output::Furnished(_)
         ));
         assert!(matches!(
             daemon.drain(first.id).as_deref(),
-            Some([Event { response: wire::Response::Changed(_), .. }])
+            Some([Event { frame: Frame::Changed(wire::Furnishing::Furnished(_)), .. }])
         ));
         assert!(daemon.drain(second.id).unwrap().is_empty());
         assert!(daemon.drain(login.id).unwrap().is_empty());
 
-        let first_failure = wire::Response::CleanupFailed(wire::CleanupFailure {
+        let first_failure = Frame::Changed(wire::Furnishing::CleanupFailed(wire::CleanupFailure {
             workspace: workspace_named("first"),
             generation_id: wire::GenerationId("sha256:first".into()),
             publication_revision: wire::PublicationRevision(1),
@@ -1684,32 +1683,32 @@ mod tests {
                 file_operation: wire::FileOperation::Cleaning,
                 file_evidence: wire::FileEvidence::PermissionDenied,
             },
-        });
+        }));
         daemon.event(first_owner.clone(), first_failure);
         for revision in 2..20 {
             let mut other = daemon.state(&second_owner)[0].clone();
             other.publication_revision = wire::PublicationRevision(revision);
-            daemon.event(second_owner.clone(), wire::Response::Changed(other));
+            daemon.event(second_owner.clone(), Frame::Changed(wire::Furnishing::Furnished(other)));
         }
         assert!(matches!(
             daemon.drain(first.id).as_deref(),
-            Some([Event { response: wire::Response::CleanupFailed(_), .. }])
+            Some([Event { frame: Frame::Changed(wire::Furnishing::CleanupFailed(_)), .. }])
         ));
         assert_eq!(daemon.drain(login.id).unwrap(), Vec::<Event>::new());
 
         let mut first_changed = daemon.state(&first_owner)[0].clone();
         first_changed.publication_revision = wire::PublicationRevision(20);
-        daemon.event(first_owner.clone(), wire::Response::Changed(first_changed));
+        daemon.event(first_owner.clone(), Frame::Changed(wire::Furnishing::Furnished(first_changed)));
         assert!(matches!(
             daemon.drain(first.id).as_deref(),
-            Some([Event { response: wire::Response::Changed(_), .. }])
+            Some([Event { frame: Frame::Changed(wire::Furnishing::Furnished(_)), .. }])
         ));
 
         daemon.unsubscribe(second.id);
         let reconnected = daemon.subscribe(second_owner).unwrap();
         assert!(matches!(
-            reconnected.initial.response,
-            wire::Response::Subscribed(ref values)
+            reconnected.initial.frame,
+            Frame::Opened(wire::Workspaces(ref values))
                 if values.len() == 1 && values[0].workspace == workspace_named("second")
         ));
     }
@@ -1726,8 +1725,8 @@ mod tests {
         });
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1745,10 +1744,10 @@ mod tests {
         for (owner, name) in [(first_owner.clone(), "first"), (second_owner, "second")] {
             assert!(matches!(
                 daemon.handle_as(
-                    wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named(name)) },
+                    PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named(name)) },
                     owner,
                 ),
-                wire::Response::Furnished(_)
+                wire::Output::Furnished(_)
             ));
         }
         let furnished = daemon.workspace(&workspace_named("first")).unwrap().successful.clone().unwrap();
@@ -1760,7 +1759,7 @@ mod tests {
         daemon.memory.cleanup_maintenance.push(maintenance.clone());
         let subscription = daemon.subscribe(first_owner).unwrap();
 
-        daemon.effects.replies.push_back(emission::Response::CleanupRefused(wire::FileFailure {
+        daemon.effects.replies.push_back(emission::Output::CleanupRefused(wire::FileFailure {
             workspace: workspace_named("second"),
             file_operation: wire::FileOperation::Cleaning,
             file_evidence: wire::FileEvidence::PermissionDenied,
@@ -1769,7 +1768,7 @@ mod tests {
         assert!(daemon.drain(subscription.id).unwrap().is_empty());
         assert!(daemon.memory.cleanup_maintenance.contains(&maintenance));
 
-        daemon.effects.replies.push_back(emission::Response::CleanupRefused(wire::FileFailure {
+        daemon.effects.replies.push_back(emission::Output::CleanupRefused(wire::FileFailure {
             workspace: workspace_named("first"),
             file_operation: wire::FileOperation::Staging,
             file_evidence: wire::FileEvidence::PermissionDenied,
@@ -1778,7 +1777,7 @@ mod tests {
         assert!(daemon.drain(subscription.id).unwrap().is_empty());
         assert!(daemon.memory.cleanup_maintenance.contains(&maintenance));
 
-        daemon.effects.replies.push_back(emission::Response::CleanupRefused(wire::FileFailure {
+        daemon.effects.replies.push_back(emission::Output::CleanupRefused(wire::FileFailure {
             workspace: workspace_named("first"),
             file_operation: wire::FileOperation::Cleaning,
             file_evidence: wire::FileEvidence::PermissionDenied,
@@ -1787,17 +1786,17 @@ mod tests {
         assert!(matches!(
             daemon.drain(subscription.id).as_deref(),
             Some([Event {
-                response: wire::Response::CleanupFailed(wire::CleanupFailure {
+                frame: Frame::Changed(wire::Furnishing::CleanupFailed(wire::CleanupFailure {
                     workspace,
                     file_failure: wire::FileFailure { workspace: failed_workspace, file_operation: wire::FileOperation::Cleaning, .. },
                     ..
-                }),
+                })),
                 ..
             }]) if workspace == &workspace_named("first") && failed_workspace == &workspace_named("first")
         ));
         assert!(daemon.memory.cleanup_maintenance.contains(&maintenance));
         let clean_requests: Vec<_> = daemon.effects.calls.iter().filter_map(|query| match query {
-            emission::Query::Clean(request) => Some(request),
+            emission::Input::Clean(request) => Some(request),
             _ => None,
         }).collect();
         assert_eq!(clean_requests.len(), 3);
@@ -1808,8 +1807,8 @@ mod tests {
     fn failed_refurnish_keeps_prior_success_and_emits_no_success() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -1823,26 +1822,26 @@ mod tests {
         .unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let subscription = daemon.subscribe(wire::Owner::Login(caller().user_id)).unwrap();
-        daemon.effects.replies.push_back(emission::Response::Snapshotted(snapshot("two", "two")));
-        daemon.effects.replies.push_back(emission::Response::EmissionRefused(
+        daemon.effects.replies.push_back(emission::Output::Snapshotted(snapshot("two", "two")));
+        daemon.effects.replies.push_back(emission::Output::EmissionRefused(
             emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
                 publication_evidence: emission::PublicationEvidence::PermissionDenied,
             }),
         ));
-        daemon.effects.replies.push_back(emission::Response::Inspected(
+        daemon.effects.replies.push_back(emission::Output::Inspected(
             emission::PublicationInspection {
                 workspace: workspace(),
                 publication_identity_option: None,
                 publication_manifest_option: None,
             },
         ));
-        daemon.effects.replies.push_back(emission::Response::EmissionRefused(
+        daemon.effects.replies.push_back(emission::Output::EmissionRefused(
             emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
                 workspace: workspace(),
                 publication_operation: emission::PublicationOperation::StagingGeneration,
@@ -1852,37 +1851,37 @@ mod tests {
         daemon.poll_once();
         let events = daemon.drain(subscription.id).unwrap();
         assert!(!events.is_empty());
-        assert!(events.iter().all(|event| matches!(event.response, wire::Response::RefurnishFailed(_))));
+        assert!(events.iter().all(|event| matches!(event.frame, Frame::Changed(wire::Furnishing::RefurnishFailed(_)))));
         assert!(daemon.memory.workspaces[0].pending.is_some());
         assert!(daemon.memory.workspaces[0].successful.is_some());
         let reconnect = daemon.subscribe(wire::Owner::Login(caller().user_id)).unwrap_err();
         assert!(matches!(reconnect, wire::Refusal::SubscriberCapacityReached(1)));
         daemon.unsubscribe(subscription.id);
         let reconnect = daemon.subscribe(wire::Owner::Login(translator::UserId(1000))).unwrap();
-        assert!(matches!(reconnect.initial.response, wire::Response::Subscribed(ref values) if values.len() == 1));
+        assert!(matches!(reconnect.initial.frame, Frame::Opened(wire::Workspaces(ref values)) if values.len() == 1));
     }
 
     #[test]
     fn publication_refusals_are_bound_to_the_requested_workspace() {
-        let wrong_workspace_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
+        let wrong_workspace_refusal = || emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace: workspace_named("other"),
             publication_operation: emission::PublicationOperation::ReplacingPointer,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
         }));
-        let wrong_variant_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
+        let wrong_variant_refusal = || emission::Output::EmissionRefused(emission::EmissionRefusal::Source(emission::SourceRefusal {
             repository: repository(),
             source_operation: emission::SourceOperation::ReadingMain,
             source_evidence: emission::SourceEvidence::MainUnavailable,
         }));
-        let matching_refusal = || emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
+        let matching_refusal = || emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace: workspace(),
             publication_operation: emission::PublicationOperation::ReplacingPointer,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
         }));
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
                 wrong_workspace_refusal(),
             ].into(),
             ..Default::default()
@@ -1895,8 +1894,8 @@ mod tests {
         register(&mut daemon);
 
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Refused(wire::Refusal::NotReady)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Refused(wire::Refusal::NotReady)
         ));
 
         let expected_memory = daemon.memory.clone();
@@ -1920,26 +1919,26 @@ mod tests {
 
         for malformed in [wrong_workspace_refusal(), wrong_variant_refusal()] {
             daemon.effects.replies.push_back(malformed);
-            assert!(matches!(daemon.publish(pending.clone()), wire::Response::Refused(wire::Refusal::NotReady)));
+            assert!(matches!(daemon.publish(pending.clone()), wire::Output::Refused(wire::Refusal::NotReady)));
             assert_unchanged!();
         }
         daemon.effects.replies.push_back(matching_refusal());
         assert!(matches!(
             daemon.publish(pending.clone()),
-            wire::Response::Refused(wire::Refusal::File(wire::FileFailure { workspace: failed_workspace, .. }))
+            wire::Output::Refused(wire::Refusal::File(wire::FileFailure { workspace: failed_workspace, .. }))
                 if failed_workspace == workspace()
         ));
         assert_unchanged!();
 
         for malformed in [wrong_workspace_refusal(), wrong_variant_refusal()] {
             daemon.effects.replies.push_back(malformed);
-            assert!(matches!(daemon.recover_one(&workspace()), Some(wire::Response::Refused(wire::Refusal::NotReady))));
+            assert!(matches!(daemon.recover_one(&workspace()), Some(wire::Output::Refused(wire::Refusal::NotReady))));
             assert_unchanged!();
         }
         daemon.effects.replies.push_back(matching_refusal());
         assert!(matches!(
             daemon.recover_one(&workspace()),
-            Some(wire::Response::Refused(wire::Refusal::File(wire::FileFailure { workspace: failed_workspace, .. })))
+            Some(wire::Output::Refused(wire::Refusal::File(wire::FileFailure { workspace: failed_workspace, .. })))
                 if failed_workspace == workspace()
         ));
         assert_unchanged!();
@@ -1947,7 +1946,7 @@ mod tests {
 
     #[test]
     fn published_state_completes_only_the_attempted_workspace() {
-        let refusal_for = |workspace| emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
+        let refusal_for = |workspace| emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace,
             publication_operation: emission::PublicationOperation::StagingGeneration,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -1957,8 +1956,8 @@ mod tests {
         let absent = workspace_named("absent");
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
                 refusal_for(first.clone()),
             ].into(),
             ..Default::default()
@@ -1970,13 +1969,13 @@ mod tests {
         ).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("first")) }),
-            wire::Response::Refused(wire::Refusal::File(_))
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named("first")) }),
+            wire::Output::Refused(wire::Refusal::File(_))
         ));
         daemon.effects.replies.push_back(refusal_for(second.clone()));
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("second")) }),
-            wire::Response::Refused(wire::Refusal::File(_))
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named("second")) }),
+            wire::Output::Refused(wire::Refusal::File(_))
         ));
 
         let first_publication = daemon.workspace(&first).unwrap().pending.clone().unwrap();
@@ -1999,27 +1998,27 @@ mod tests {
             };
         }
 
-        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+        daemon.effects.replies.push_back(emission::Output::Published(emission::PublicationState {
             workspace: second.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: second_publication.generation_id.clone(),
                 publication_revision: second_publication.intended_publication.0,
             },
         }));
-        assert!(matches!(daemon.publish(first_publication.clone()), wire::Response::Refused(wire::Refusal::NotReady)));
+        assert!(matches!(daemon.publish(first_publication.clone()), wire::Output::Refused(wire::Refusal::NotReady)));
         assert_unchanged!();
 
-        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+        daemon.effects.replies.push_back(emission::Output::Published(emission::PublicationState {
             workspace: absent,
             publication_identity: emission::PublicationIdentity {
                 generation_id: wire::GenerationId("absent".into()),
                 publication_revision: wire::PublicationRevision(1),
             },
         }));
-        assert!(matches!(daemon.publish(first_publication.clone()), wire::Response::Refused(wire::Refusal::NotReady)));
+        assert!(matches!(daemon.publish(first_publication.clone()), wire::Output::Refused(wire::Refusal::NotReady)));
         assert_unchanged!();
 
-        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+        daemon.effects.replies.push_back(emission::Output::Published(emission::PublicationState {
             workspace: first.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: wire::GenerationId("wrong".into()),
@@ -2028,18 +2027,18 @@ mod tests {
         }));
         assert!(matches!(
             daemon.publish(first_publication.clone()),
-            wire::Response::Refused(wire::Refusal::File(wire::FileFailure { workspace, .. })) if workspace == first
+            wire::Output::Refused(wire::Refusal::File(wire::FileFailure { workspace, .. })) if workspace == first
         ));
         assert_unchanged!();
 
-        daemon.effects.replies.push_back(emission::Response::Published(emission::PublicationState {
+        daemon.effects.replies.push_back(emission::Output::Published(emission::PublicationState {
             workspace: first.clone(),
             publication_identity: emission::PublicationIdentity {
                 generation_id: first_publication.generation_id.clone(),
                 publication_revision: first_publication.intended_publication.0,
             },
         }));
-        assert!(matches!(daemon.publish(first_publication), wire::Response::Furnished(wire::FurnishedWorkspace { workspace, .. }) if workspace == first));
+        assert!(matches!(daemon.publish(first_publication), wire::Output::Furnished(wire::FurnishedWorkspace { workspace, .. }) if workspace == first));
         assert!(daemon.core.pending_intent(&first).is_none());
         assert!(daemon.core.successful_publication(&first).is_some());
         assert_eq!(daemon.core.pending_intent(&second), expected_second.as_ref());
@@ -2050,7 +2049,7 @@ mod tests {
 
     #[test]
     fn inspected_state_recovers_only_the_requested_workspace() {
-        let refusal_for = |workspace| emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
+        let refusal_for = |workspace| emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(emission::PublicationRefusal {
             workspace,
             publication_operation: emission::PublicationOperation::InspectingPointer,
             publication_evidence: emission::PublicationEvidence::PermissionDenied,
@@ -2073,8 +2072,8 @@ mod tests {
         let second = workspace_named("second");
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
                 refusal_for(first.clone()),
             ].into(),
             ..Default::default()
@@ -2086,13 +2085,13 @@ mod tests {
         ).unwrap();
         register(&mut daemon);
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("first")) }),
-            wire::Response::Refused(wire::Refusal::File(_))
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named("first")) }),
+            wire::Output::Refused(wire::Refusal::File(_))
         ));
         daemon.effects.replies.push_back(refusal_for(second.clone()));
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request_named("second")) }),
-            wire::Response::Refused(wire::Refusal::File(_))
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request_named("second")) }),
+            wire::Output::Refused(wire::Refusal::File(_))
         ));
 
         let first_publication = daemon.workspace(&first).unwrap().pending.clone().unwrap();
@@ -2115,19 +2114,19 @@ mod tests {
             };
         }
 
-        daemon.effects.replies.push_back(emission::Response::Inspected(exact_inspection(second.clone(), &second_publication)));
-        assert!(matches!(daemon.recover_one(&first), Some(wire::Response::Refused(wire::Refusal::NotReady))));
+        daemon.effects.replies.push_back(emission::Output::Inspected(exact_inspection(second.clone(), &second_publication)));
+        assert!(matches!(daemon.recover_one(&first), Some(wire::Output::Refused(wire::Refusal::NotReady))));
         assert_unchanged!();
 
-        daemon.effects.replies.push_back(emission::Response::Inspected(emission::PublicationInspection {
+        daemon.effects.replies.push_back(emission::Output::Inspected(emission::PublicationInspection {
             workspace: workspace_named("absent"),
             publication_identity_option: None,
             publication_manifest_option: None,
         }));
-        assert!(matches!(daemon.recover_one(&first), Some(wire::Response::Refused(wire::Refusal::NotReady))));
+        assert!(matches!(daemon.recover_one(&first), Some(wire::Output::Refused(wire::Refusal::NotReady))));
         assert_unchanged!();
 
-        daemon.effects.replies.push_back(emission::Response::Inspected(emission::PublicationInspection {
+        daemon.effects.replies.push_back(emission::Output::Inspected(emission::PublicationInspection {
             workspace: first.clone(),
             publication_identity_option: Some(emission::PublicationIdentity {
                 generation_id: wire::GenerationId("wrong".into()),
@@ -2137,26 +2136,26 @@ mod tests {
         }));
         assert!(matches!(
             daemon.recover_one(&first),
-            Some(wire::Response::Refused(wire::Refusal::File(wire::FileFailure { workspace, .. }))) if workspace == first
+            Some(wire::Output::Refused(wire::Refusal::File(wire::FileFailure { workspace, .. }))) if workspace == first
         ));
         assert_unchanged!();
 
-        daemon.effects.replies.push_back(emission::Response::Inspected(exact_inspection(first.clone(), &first_publication)));
+        daemon.effects.replies.push_back(emission::Output::Inspected(exact_inspection(first.clone(), &first_publication)));
         assert!(matches!(
             daemon.recover_one(&first),
-            Some(wire::Response::Furnished(wire::FurnishedWorkspace { workspace, .. })) if workspace == first
+            Some(wire::Output::Furnished(wire::FurnishedWorkspace { workspace, .. })) if workspace == first
         ));
         assert!(daemon.core.pending_intent(&first).is_none());
         assert!(daemon.core.successful_publication(&first).is_some());
         assert_eq!(daemon.core.pending_intent(&second), expected_second.as_ref());
 
         daemon.effects.replies.extend([
-            emission::Response::Inspected(emission::PublicationInspection {
+            emission::Output::Inspected(emission::PublicationInspection {
                 workspace: second.clone(),
                 publication_identity_option: None,
                 publication_manifest_option: None,
             }),
-            emission::Response::Published(emission::PublicationState {
+            emission::Output::Published(emission::PublicationState {
                 workspace: second.clone(),
                 publication_identity: emission::PublicationIdentity {
                     generation_id: second_publication.generation_id,
@@ -2166,7 +2165,7 @@ mod tests {
         ]);
         assert!(matches!(
             daemon.recover_one(&second),
-            Some(wire::Response::Furnished(wire::FurnishedWorkspace { workspace, .. })) if workspace == second
+            Some(wire::Output::Furnished(wire::FurnishedWorkspace { workspace, .. })) if workspace == second
         ));
         assert!(daemon.core.pending_intent(&second).is_none());
         assert!(daemon.core.successful_publication(&second).is_some());
@@ -2179,8 +2178,8 @@ mod tests {
         image.configuration.subscriber_capacity = Some(2);
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -2194,35 +2193,35 @@ mod tests {
         .unwrap();
         register(&mut daemon);
         daemon.effects.replies.extend([
-            emission::Response::Snapshotted(other_snapshot("other-one", "same")),
-            emission::Response::Snapshotted(other_snapshot("other-one", "same")),
+            emission::Output::Snapshotted(other_snapshot("other-one", "same")),
+            emission::Output::Snapshotted(other_snapshot("other-one", "same")),
         ]);
         assert!(matches!(
-            daemon.handle(wire::Call {
+            daemon.handle(PublicCall {
                 caller: caller(),
-                query: wire::Query::Register(other_repository()),
+                query: wire::Input::Register(other_repository()),
             }),
-            wire::Response::Registered(_)
+            wire::Output::Registered(_)
         ));
         assert!(matches!(
-            daemon.handle(wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) }),
-            wire::Response::Furnished(_)
+            daemon.handle(PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) }),
+            wire::Output::Furnished(_)
         ));
         let owner = wire::Owner::Login(caller().user_id);
         let owned = daemon.subscribe(owner).unwrap();
         let other = daemon.subscribe(peer_owner("client")).unwrap();
 
         daemon.effects.replies.extend([
-            emission::Response::Snapshotted(snapshot("one", "one")),
-            emission::Response::Snapshotted(other_snapshot("other-two", "same")),
-            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(
+            emission::Output::Snapshotted(snapshot("one", "one")),
+            emission::Output::Snapshotted(other_snapshot("other-two", "same")),
+            emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(
                 emission::PublicationRefusal {
                     workspace: workspace(),
                     publication_operation: emission::PublicationOperation::StagingGeneration,
                     publication_evidence: emission::PublicationEvidence::PermissionDenied,
                 },
             )),
-            emission::Response::Inspected(emission::PublicationInspection {
+            emission::Output::Inspected(emission::PublicationInspection {
                 workspace: workspace(),
                 publication_identity_option: None,
                 publication_manifest_option: None,
@@ -2233,11 +2232,11 @@ mod tests {
         let expected_workspace = workspace();
         assert!(!failures.is_empty());
         assert!(failures.iter().all(|event| matches!(
-            event.response,
-            wire::Response::RefurnishFailed(wire::RefurnishFailure {
+            event.frame,
+            Frame::Changed(wire::Furnishing::RefurnishFailed(wire::RefurnishFailure {
                 ref workspace,
                 refusal_kind: wire::RefusalKind::File,
-            }) if workspace == &expected_workspace
+            })) if workspace == &expected_workspace
         )));
         assert!(daemon.drain(other.id).unwrap().is_empty());
     }
@@ -2297,8 +2296,8 @@ mod tests {
     fn cross_owner_cannot_replace_workspace() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -2321,24 +2320,24 @@ mod tests {
         register(&mut daemon);
         assert!(matches!(
             daemon.handle_as(
-                wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) },
+                PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) },
                 peer_owner("client"),
             ),
-            wire::Response::Furnished(_)
+            wire::Output::Furnished(_)
         ));
         let response = daemon.handle_as(
-            wire::Call { caller: caller(), query: wire::Query::Furnish(furnish_request()) },
+            PublicCall { caller: caller(), query: wire::Input::Furnish(furnish_request()) },
             peer_owner("other"),
         );
-        assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotAuthorized(_))));
+        assert!(matches!(response, wire::Output::Refused(wire::Refusal::NotAuthorized(_))));
     }
 
     #[test]
     fn cleanup_failure_is_separate_and_retried_under_current_policy() {
         let effects = FakeEffects {
             replies: [
-                emission::Response::Snapshotted(snapshot("one", "one")),
-                emission::Response::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
+                emission::Output::Snapshotted(snapshot("one", "one")),
             ]
             .into(),
             publish_from_query: true,
@@ -2354,16 +2353,16 @@ mod tests {
         };
         let mut daemon = Daemon::start(bootstrap(), effects, memory).unwrap();
         register(&mut daemon);
-        let response = daemon.handle(wire::Call {
+        let response = daemon.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Furnish(furnish_request()),
+            query: wire::Input::Furnish(furnish_request()),
         });
-        assert!(matches!(response, wire::Response::Furnished(_)));
-        let response = daemon.handle(wire::Call {
+        assert!(matches!(response, wire::Output::Furnished(_)));
+        let response = daemon.handle(PublicCall {
             caller: caller(),
-            query: wire::Query::Furnish(furnish_request()),
+            query: wire::Input::Furnish(furnish_request()),
         });
-        assert!(matches!(response, wire::Response::Furnished(_)));
+        assert!(matches!(response, wire::Output::Furnished(_)));
         assert!(daemon.memory.workspaces[0].successful.is_some());
         assert_eq!(daemon.memory.cleanup_maintenance.len(), 1);
         assert_eq!(daemon.memory.cleanup_maintenance[0].publication_revision, wire::PublicationRevision(1));
@@ -2371,19 +2370,19 @@ mod tests {
         assert!(daemon
             .events
             .iter()
-            .any(|event| matches!(event.response, wire::Response::CleanupFailed(_))));
+            .any(|event| matches!(event.frame, Frame::Changed(wire::Furnishing::CleanupFailed(_)))));
         assert!(matches!(
-            daemon.handle(wire::Call {
+            daemon.handle(PublicCall {
                 caller: caller(),
-                query: wire::Query::Furnish(furnish_request()),
+                query: wire::Input::Furnish(furnish_request()),
             }),
-            wire::Response::Refused(wire::Refusal::NotReady)
+            wire::Output::Refused(wire::Refusal::NotReady)
         ));
 
         daemon
             .effects
             .replies
-            .push_back(emission::Response::Snapshotted(snapshot("one", "one")));
+            .push_back(emission::Output::Snapshotted(snapshot("one", "one")));
         daemon.poll_once();
         assert!(daemon.memory.cleanup_maintenance.is_empty());
         assert!(daemon.memory.workspaces[0].successful.is_some());
@@ -2392,11 +2391,10 @@ mod tests {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BootstrapError {
-    SocketCollision,
     InvalidAdmission,
     Memory(MemoryError),
     CorruptState,
-    Refused(meta::BootstrapRefusal),
+    Refused(belief_nexus_wire::bootstrap::BootstrapRefusal),
     Preparation(String),
     MemoryFile(String),
 }
@@ -2407,9 +2405,9 @@ pub trait PreparesMemory {
     fn prepared_memory(&self, effective_user: i64) -> Result<PathBuf, BootstrapError>;
 }
 
-impl PreparesMemory for meta::NexusBootstrap {
+impl PreparesMemory for NexusBootstrap {
     fn prepared_memory(&self, effective_user: i64) -> Result<PathBuf, BootstrapError> {
-        use meta::{Locating, Validating};
+        use belief_nexus_wire::bootstrap::{Locating, Validating};
         use memory_files::{MemoryFileSelecting, MemoryFilesFromCurrent};
         use translator::placement::{Held, ScopedPreparation};
         self.validated(effective_user).map_err(BootstrapError::Refused)?;
@@ -2653,7 +2651,7 @@ impl MemoryImage {
 pub struct Event {
     pub sequence: i64,
     pub owner: wire::Owner,
-    pub response: wire::Response,
+    pub frame: Frame,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2677,6 +2675,9 @@ pub struct Daemon<E, M> {
     watch_failures: Vec<WatchFailure>,
     subscribers: HashMap<i64, Subscriber>,
     next_subscriber: i64,
+    /// The sequence of the last event recorded, announced to every open
+    /// subscription so it drains what is new for it.
+    announced: tokio::sync::watch::Sender<i64>,
 }
 
 impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
@@ -2687,7 +2688,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
     ) -> Result<Self, BootstrapError> {
         validate_bootstrap(&bootstrap.nexus)?;
         let loaded = store.load().map_err(BootstrapError::Memory)?;
-        let bootstrap_owner = bootstrap.nexus.bootstrap_owner.0.clone();
+        let bootstrap_owner = bootstrap.nexus.owner.clone();
         let memory = loaded.clone().unwrap_or_else(|| MemoryImage::empty(bootstrap_owner));
         if memory.next_event_sequence < 1 || memory.configuration.revision.0 < 0 {
             return Err(BootstrapError::CorruptState);
@@ -2705,6 +2706,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             watch_failures: Vec::new(),
             subscribers: HashMap::new(),
             next_subscriber: 1,
+            announced: tokio::sync::watch::Sender::new(0),
         };
         daemon.recover_pending();
         daemon.reconcile_startup();
@@ -2721,7 +2723,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 continue;
             }
             let owner = stored.owner.clone();
-            if let wire::Response::Refused(refusal) = self.furnish(
+            if let wire::Output::Refused(refusal) = self.furnish(
                 owner.clone(),
                 translator::Caller {
                     user_id: translator::UserId(0),
@@ -2729,97 +2731,97 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 },
                 stored.request,
             ) {
-                self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                self.event(owner, Frame::Changed(wire::Furnishing::RefurnishFailed(wire::RefurnishFailure {
                     workspace,
                     refusal_kind: refusal_kind(&refusal),
-                }));
+                })));
             }
         }
     }
 
-    fn emit_effect(&mut self, query: emission::Query) -> emission::Response {
+    fn emit_effect(&mut self, query: emission::Input) -> emission::Output {
         let revision = self.memory.configuration.revision;
         let attempt = emission::EmissionAttempt {
             configuration_revision: revision,
             translator_configuration: self.memory.configuration.translator_configuration(),
-            query: query.clone(),
+            input: query.clone(),
         };
         let outcome = self.effects.emit(attempt);
-        if outcome.configuration_revision == revision { outcome.response } else { emission_mismatch(&query) }
+        if outcome.configuration_revision == revision { outcome.output } else { emission_mismatch(&query) }
     }
 
-    pub fn handle(&mut self, call: wire::Call) -> wire::Response {
+    pub fn handle(&mut self, call: PublicCall) -> wire::Output {
         let owner = wire::Owner::Login(call.caller.user_id);
         self.handle_as(call, owner)
     }
 
-    pub fn handle_as(&mut self, call: wire::Call, owner: wire::Owner) -> wire::Response {
+    pub fn handle_as(&mut self, call: PublicCall, owner: wire::Owner) -> wire::Output {
         if !self.owner_allowed(&owner) {
-            return wire::Response::Refused(wire::Refusal::NotAuthorized(call.caller));
+            return wire::Output::Refused(wire::Refusal::NotAuthorized(call.caller));
         }
         if !self.memory.configuration.ready() {
-            return wire::Response::Refused(wire::Refusal::NotReady);
+            return wire::Output::Refused(wire::Refusal::NotReady);
         }
         match call.query {
-            wire::Query::Register(repository) => self.register(owner, call.caller, repository),
-            wire::Query::Resolve(names) => {
+            wire::Input::Register(repository) => self.register(owner, call.caller, repository),
+            wire::Input::Resolve(names) => {
                 if self
                     .memory
                     .repositories
                     .iter()
                     .any(|repository| !same_owner(&repository.owner, &owner))
                 {
-                    wire::Response::Refused(wire::Refusal::NotAuthorized(call.caller))
+                    wire::Output::Refused(wire::Refusal::NotAuthorized(call.caller))
                 } else {
                     self.core
                         .resolve(&names)
-                        .map(wire::Response::Resolved)
-                        .unwrap_or_else(|error| wire::Response::Refused(resolve_refusal(error)))
+                        .map(wire::Output::Resolved)
+                        .unwrap_or_else(|error| wire::Output::Refused(resolve_refusal(error)))
                 }
             }
-            wire::Query::Furnish(request) => self.furnish(owner, call.caller, request),
-            wire::Query::Subscribe => self
+            wire::Input::Furnish(request) => self.furnish(owner, call.caller, request),
+            wire::Input::Subscribe => self
                 .subscribe(owner)
-                .map(|subscription| subscription.initial.response)
-                .unwrap_or_else(wire::Response::Refused),
+                .map(|subscription| wire::Output::Subscribed(subscription.initial.frame))
+                .unwrap_or_else(wire::Output::Refused),
         }
     }
 
-    pub fn open_subscription(&mut self, call: wire::Call) -> Result<Subscription, wire::Response> {
+    pub fn open_subscription(&mut self, call: PublicCall) -> Result<Subscription, wire::Output> {
         let owner = wire::Owner::Login(call.caller.user_id);
         self.open_subscription_as(call, owner)
     }
 
-    pub fn open_subscription_as(&mut self, call: wire::Call, owner: wire::Owner) -> Result<Subscription, wire::Response> {
+    pub fn open_subscription_as(&mut self, call: PublicCall, owner: wire::Owner) -> Result<Subscription, wire::Output> {
         if !self.owner_allowed(&owner) {
-            return Err(wire::Response::Refused(wire::Refusal::NotAuthorized(
+            return Err(wire::Output::Refused(wire::Refusal::NotAuthorized(
                 call.caller,
             )));
         }
         if !self.memory.configuration.ready() {
-            return Err(wire::Response::Refused(wire::Refusal::NotReady));
+            return Err(wire::Output::Refused(wire::Refusal::NotReady));
         }
-        if !matches!(call.query, wire::Query::Subscribe) {
-            return Err(wire::Response::Refused(wire::Refusal::NotReady));
+        if !matches!(call.query, wire::Input::Subscribe) {
+            return Err(wire::Output::Refused(wire::Refusal::NotReady));
         }
-        self.subscribe(owner).map_err(wire::Response::Refused)
+        self.subscribe(owner).map_err(wire::Output::Refused)
     }
 
     pub fn polling_timeout(&self) -> Option<meta::Timeout> {
         self.memory.configuration.repository_polling
     }
 
-    pub fn configure(&mut self, call: meta::MetaCall) -> meta::Response {
+    pub fn configure(&mut self, call: MetaCall) -> meta::Output {
         if self.memory.owner != wire::Owner::Login(call.caller.user_id) {
-            return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(
+            return meta::Output::ConfigureRefused(meta::ConfigurationRefusal::NotAuthorized(
                 call.caller,
             ));
         }
-        let meta::Query::Configure(request) = call.query;
+        let meta::Input::Configure(request) = call.query;
         if request.configuration_revision_option.as_ref().is_some_and(|expected|
             expected != &self.memory.configuration.revision)
         {
-            return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::StaleRevision(
+            return meta::Output::ConfigureRefused(meta::ConfigurationRefusal::StaleRevision(
                 meta::StaleRevision {
                     configuration_revision_option: request.configuration_revision_option,
                     configuration_revision: self.memory.configuration.revision,
@@ -2838,7 +2840,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             _ => None,
         };
         if let Some(message) = invalid {
-            return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Invalid(
+            return meta::Output::ConfigureRefused(meta::ConfigurationRefusal::Invalid(
                 meta::Invalid {
                     keeper: meta::Keeper::Nexus,
                     setting_address: setting_address(&set),
@@ -2847,7 +2849,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             ));
         }
         let Some(next_revision) = self.memory.configuration.revision.0.checked_add(1) else {
-            return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
+            return meta::Output::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
         };
         let previous = self.memory.configuration.clone();
         match &set {
@@ -2886,10 +2888,10 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.memory.configuration.revision.0 = next_revision;
         if self.persist().is_err() {
             self.memory.configuration = previous;
-            return meta::Response::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
+            return meta::Output::ConfigureRefused(meta::ConfigurationRefusal::Unavailable);
         }
         let keeper = setting_owner(&set);
-        meta::Response::Configured(meta::ConfiguredState {
+        meta::Output::Configured(meta::ConfiguredState {
             set,
             keeper,
             configuration_revision: self.memory.configuration.revision,
@@ -2897,16 +2899,21 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         })
     }
 
-    pub fn meta_transport(&mut self, input: meta::MetaTransportInput) -> meta::MetaTransportOutput {
+    pub fn meta_transport(&mut self, input: meta_call::Input) -> meta_call::Output {
         match input {
-            meta::MetaTransportInput::Call(call) => meta::MetaTransportOutput::Answered(self.configure(call)),
-            meta::MetaTransportInput::RestoreTranslatorConfiguration => {
-                meta::MetaTransportOutput::Restored(self.memory.configuration.translator_configuration())
+            meta_call::Input::Call(call) => meta_call::Output::Answered(self.configure(call)),
+            meta_call::Input::RestoreTranslatorConfiguration => {
+                meta_call::Output::Restored(self.memory.configuration.translator_configuration())
             }
         }
     }
 
-    pub fn recover_pending(&mut self) -> Vec<wire::Response> {
+    /// Announces the sequence of each event recorded from now on.
+    pub fn announcements(&self) -> tokio::sync::watch::Receiver<i64> {
+        self.announced.subscribe()
+    }
+
+    pub fn recover_pending(&mut self) -> Vec<wire::Output> {
         let workspaces: Vec<_> = self
             .memory
             .workspaces
@@ -2935,16 +2942,16 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             })
             .collect();
         for (repository, old_revision) in repositories {
-            match self.emit_effect(emission::Query::Snapshot(repository.clone()))
+            match self.emit_effect(emission::Input::Snapshot(repository.clone()))
             {
-                emission::Response::Snapshotted(snapshot)
+                emission::Output::Snapshotted(snapshot)
                     if snapshot.repository != repository => self
                         .watch_failures
                         .push(watch_unavailable(repository, Some(old_revision))),
-                emission::Response::Snapshotted(snapshot)
+                emission::Output::Snapshotted(snapshot)
                     if snapshot.source_revision == old_revision => {}
-                emission::Response::Snapshotted(snapshot) => self.apply_snapshot(snapshot),
-                emission::Response::EmissionRefused(emission::EmissionRefusal::Source(source))
+                emission::Output::Snapshotted(snapshot) => self.apply_snapshot(snapshot),
+                emission::Output::EmissionRefused(emission::EmissionRefusal::Source(source))
                     if source.repository == repository =>
                 {
                     let failure = map_source(source, wire::SourceOperation::Watching);
@@ -2999,38 +3006,38 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         self.events.retain(|event| event.sequence > after);
     }
 
-    fn register(&mut self, owner: wire::Owner, caller: translator::Caller, repository: wire::Repository) -> wire::Response {
+    fn register(&mut self, owner: wire::Owner, caller: translator::Caller, repository: wire::Repository) -> wire::Output {
         if self
             .memory
             .repositories
             .iter()
             .any(|stored| !same_owner(&stored.owner, &owner))
         {
-            return wire::Response::Refused(wire::Refusal::NotAuthorized(caller));
+            return wire::Output::Refused(wire::Refusal::NotAuthorized(caller));
         }
         if self
             .repository(&repository)
             .is_some_and(|stored| !same_owner(&stored.owner, &owner))
         {
-            return wire::Response::Refused(wire::Refusal::NotAuthorized(caller));
+            return wire::Output::Refused(wire::Refusal::NotAuthorized(caller));
         }
-        let first = match self.emit_effect(emission::Query::Snapshot(repository.clone()))
+        let first = match self.emit_effect(emission::Input::Snapshot(repository.clone()))
         {
-            emission::Response::Snapshotted(snapshot) if snapshot.repository == repository => snapshot,
-            emission::Response::EmissionRefused(emission::EmissionRefusal::Source(refusal))
+            emission::Output::Snapshotted(snapshot) if snapshot.repository == repository => snapshot,
+            emission::Output::EmissionRefused(emission::EmissionRefusal::Source(refusal))
                 if refusal.repository == repository =>
             {
-                return wire::Response::Refused(map_emission(emission::EmissionRefusal::Source(refusal)));
+                return wire::Output::Refused(map_emission(emission::EmissionRefusal::Source(refusal)));
             }
-            _ => return wire::Response::Refused(wire::Refusal::NotReady),
+            _ => return wire::Output::Refused(wire::Refusal::NotReady),
         };
         let change = match self.install_repository(owner, first.clone()) {
             Ok(change) => change,
-            Err(()) => return wire::Response::Refused(memory_refusal(wire::MemoryOperation::Recording)),
+            Err(()) => return wire::Output::Refused(memory_refusal(wire::MemoryOperation::Recording)),
         };
         self.refurnish_changed_workspaces(change);
         // Immediate next observation closes the register/watch handoff window.
-        if let emission::Response::Snapshotted(next) = self.emit_effect(emission::Query::Snapshot(repository.clone()))
+        if let emission::Output::Snapshotted(next) = self.emit_effect(emission::Input::Snapshot(repository.clone()))
         {
             if next.repository == repository && next.source_revision != first.source_revision {
                 self.apply_snapshot(next);
@@ -3042,7 +3049,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             .snapshot
             .source_revision
             .clone();
-        wire::Response::Registered(wire::RepositoryState {
+        wire::Output::Registered(wire::RepositoryState {
             repository,
             source_revision: revision,
         })
@@ -3071,18 +3078,18 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         Ok(change)
     }
 
-    fn furnish(&mut self, owner: wire::Owner, caller: translator::Caller, request: wire::FurnishRequest) -> wire::Response {
+    fn furnish(&mut self, owner: wire::Owner, caller: translator::Caller, request: wire::FurnishRequest) -> wire::Output {
         if self
             .workspace(&request.workspace)
             .is_some_and(|stored| !same_owner(&stored.owner, &owner))
         {
-            return wire::Response::Refused(wire::Refusal::NotAuthorized(caller));
+            return wire::Output::Refused(wire::Refusal::NotAuthorized(caller));
         }
         if self
             .workspace(&request.workspace)
             .is_some_and(|stored| stored.pending.is_some())
         {
-            return wire::Response::Refused(wire::Refusal::NotReady);
+            return wire::Output::Refused(wire::Refusal::NotReady);
         }
         if self
             .memory
@@ -3097,18 +3104,18 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                 .iter()
                 .any(|maintenance| maintenance.workspace == request.workspace)
             {
-                return wire::Response::Refused(wire::Refusal::NotReady);
+                return wire::Output::Refused(wire::Refusal::NotReady);
             }
         }
         let previous = self.memory.clone();
         let revision = self.memory.configuration.revision;
-        let Some(layout) = self.memory.configuration.layout_for(&request.harness) else { return wire::Response::Refused(wire::Refusal::NotReady) };
+        let Some(layout) = self.memory.configuration.layout_for(&request.harness) else { return wire::Output::Refused(wire::Refusal::NotReady) };
         let placement_defaults = self.memory.configuration.placements.clone();
         let defaults = self.memory.configuration.placement_defaults();
         let retention = self.memory.configuration.retention.clone();
         let plan = match self.core.prepare_furnish_with_defaults(request.clone(), &defaults) {
             Ok(plan) => plan,
-            Err(error) => return wire::Response::Refused(resolve_refusal(error)),
+            Err(error) => return wire::Output::Refused(resolve_refusal(error)),
         };
         let publication = match self.core.begin_publication(
             &plan,
@@ -3120,7 +3127,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             },
         ) {
             Ok(publication) => publication,
-            Err(_) => return wire::Response::Refused(file_refusal(request.workspace.clone())),
+            Err(_) => return wire::Output::Refused(file_refusal(request.workspace.clone())),
         };
         if let Some(stored) = self.workspace_mut(&request.workspace) {
             stored.owner = owner;
@@ -3150,20 +3157,20 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             if let Ok(core) = rebuild_core(&self.memory) {
                 self.core = core;
             }
-            return wire::Response::Refused(memory_refusal(
+            return wire::Output::Refused(memory_refusal(
                 wire::MemoryOperation::BeginningPublication,
             ));
         }
         self.publish(publication)
     }
 
-    fn publish(&mut self, publication: emission::Publication) -> wire::Response {
+    fn publish(&mut self, publication: emission::Publication) -> wire::Output {
         let requested_workspace = publication.workspace.clone();
-        match self.emit_effect(emission::Query::Publish(publication)) {
-            emission::Response::Published(state) if state.workspace == requested_workspace => {
+        match self.emit_effect(emission::Input::Publish(publication)) {
+            emission::Output::Published(state) if state.workspace == requested_workspace => {
                 let furnished = match self.core.complete_publication(&state) {
                     Ok(furnished) => furnished,
-                    Err(_) => return wire::Response::Refused(file_refusal(state.workspace)),
+                    Err(_) => return wire::Output::Refused(file_refusal(state.workspace)),
                 };
                 let before = self.workspace(&state.workspace).cloned();
                 let owner = before.as_ref().map(|stored| stored.owner.clone());
@@ -3191,33 +3198,32 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     if let Ok(core) = rebuild_core(&self.memory) {
                         self.core = core;
                     }
-                    let answer =
-                        wire::Response::MemoryAfterPublication(wire::MemoryAfterPublication {
-                            workspace: state.workspace,
-                            generation_id: state.publication_identity.generation_id,
-                            publication_revision: state.publication_identity.publication_revision,
-                            memory_failure: memory_failure(
-                                wire::MemoryOperation::CompletingPublication,
-                                error,
-                            ),
-                        });
+                    let failure = wire::MemoryAfterPublication {
+                        workspace: state.workspace,
+                        generation_id: state.publication_identity.generation_id,
+                        publication_revision: state.publication_identity.publication_revision,
+                        memory_failure: memory_failure(
+                            wire::MemoryOperation::CompletingPublication,
+                            error,
+                        ),
+                    };
                     if let Some(owner) = owner {
-                        self.event(owner, answer.clone());
+                        self.event(owner, Frame::Changed(wire::Furnishing::MemoryAfterPublication(failure.clone())));
                     }
-                    return answer;
+                    return wire::Output::MemoryAfterPublication(failure);
                 }
                 if let Some(owner) = owner {
-                    self.event(owner, wire::Response::Changed(furnished.clone()));
+                    self.event(owner, Frame::Changed(wire::Furnishing::Furnished(furnished.clone())));
                 }
                 self.clean_after_success(&furnished);
-                wire::Response::Furnished(furnished)
+                wire::Output::Furnished(furnished)
             }
-            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(refusal))
+            emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(refusal))
                 if refusal.workspace == requested_workspace =>
             {
-                wire::Response::Refused(map_emission(emission::EmissionRefusal::PublicationFailed(refusal)))
+                wire::Output::Refused(map_emission(emission::EmissionRefusal::PublicationFailed(refusal)))
             }
-            _ => wire::Response::Refused(wire::Refusal::NotReady),
+            _ => wire::Output::Refused(wire::Refusal::NotReady),
         }
     }
 
@@ -3304,8 +3310,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             },
             layout: stored.layout,
         };
-        match self.emit_effect(emission::Query::Clean(request)) {
-            emission::Response::Cleaned(state)
+        match self.emit_effect(emission::Input::Clean(request)) {
+            emission::Output::Cleaned(state)
                 if state.workspace == maintenance.workspace
                     && state.publication_identity.generation_id == maintenance.generation_id
                     && state.publication_identity.publication_revision == maintenance.publication_revision =>
@@ -3324,24 +3330,24 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                     self.memory = previous;
                 }
             }
-            emission::Response::CleanupRefused(file_failure)
+            emission::Output::CleanupRefused(file_failure)
                 if file_failure.workspace == maintenance.workspace
                     && file_failure.file_operation == wire::FileOperation::Cleaning =>
             {
-                self.event(owner, wire::Response::CleanupFailed(wire::CleanupFailure {
+                self.event(owner, Frame::Changed(wire::Furnishing::CleanupFailed(wire::CleanupFailure {
                     workspace: maintenance.workspace,
                     generation_id: maintenance.generation_id,
                     publication_revision: maintenance.publication_revision,
                     file_failure,
-                }));
+                })));
             }
             _ => {}
         }
     }
 
-    fn recover_one(&mut self, workspace: &wire::Workspace) -> Option<wire::Response> {
+    fn recover_one(&mut self, workspace: &wire::Workspace) -> Option<wire::Output> {
         let stored = self.workspace(workspace)?.clone();
-        let response = self.emit_effect(emission::Query::InspectPublication(
+        let response = self.emit_effect(emission::Input::InspectPublication(
             emission::InspectionRequest {
                 workspace: workspace.clone(),
                 publication_identity: emission::PublicationIdentity {
@@ -3352,7 +3358,7 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             },
         ));
         match response {
-            emission::Response::Inspected(inspection) if inspection.workspace == *workspace => {
+            emission::Output::Inspected(inspection) if inspection.workspace == *workspace => {
                 match self.core.recover_publication(&inspection) {
                     Ok(RecoveryOutcome::Finalized(furnished)) => {
                         let previous = self.memory.clone();
@@ -3376,36 +3382,34 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
                             if let Ok(core) = rebuild_core(&self.memory) {
                                 self.core = core;
                             }
-                            let answer = wire::Response::MemoryAfterPublication(
-                                wire::MemoryAfterPublication {
-                                    workspace: workspace.clone(),
-                                    generation_id: furnished.generation_id,
-                                    publication_revision: furnished.publication_revision,
-                                    memory_failure: memory_failure(
-                                        wire::MemoryOperation::CompletingPublication,
-                                        MemoryError::Unavailable,
-                                    ),
-                                },
-                            );
-                            self.event(stored.owner.clone(), answer.clone());
-                            return Some(answer);
+                            let failure = wire::MemoryAfterPublication {
+                                workspace: workspace.clone(),
+                                generation_id: furnished.generation_id,
+                                publication_revision: furnished.publication_revision,
+                                memory_failure: memory_failure(
+                                    wire::MemoryOperation::CompletingPublication,
+                                    MemoryError::Unavailable,
+                                ),
+                            };
+                            self.event(stored.owner.clone(), Frame::Changed(wire::Furnishing::MemoryAfterPublication(failure.clone())));
+                            return Some(wire::Output::MemoryAfterPublication(failure));
                         }
-                        self.event(stored.owner.clone(), wire::Response::Changed(furnished.clone()));
+                        self.event(stored.owner.clone(), Frame::Changed(wire::Furnishing::Furnished(furnished.clone())));
                         self.clean_after_success(&furnished);
-                        Some(wire::Response::Furnished(furnished))
+                        Some(wire::Output::Furnished(furnished))
                     }
                     Ok(RecoveryOutcome::Retry) => {
                         stored.pending.map(|pending| self.publish(pending))
                     }
-                    Err(_) => Some(wire::Response::Refused(file_refusal(workspace.clone()))),
+                    Err(_) => Some(wire::Output::Refused(file_refusal(workspace.clone()))),
                 }
             }
-            emission::Response::EmissionRefused(emission::EmissionRefusal::PublicationFailed(refusal))
+            emission::Output::EmissionRefused(emission::EmissionRefusal::PublicationFailed(refusal))
                 if refusal.workspace == *workspace =>
             {
-                Some(wire::Response::Refused(map_emission(emission::EmissionRefusal::PublicationFailed(refusal))))
+                Some(wire::Output::Refused(map_emission(emission::EmissionRefusal::PublicationFailed(refusal))))
             }
-            _ => Some(wire::Response::Refused(wire::Refusal::NotReady)),
+            _ => Some(wire::Output::Refused(wire::Refusal::NotReady)),
         }
     }
 
@@ -3443,12 +3447,12 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
             };
             let owner = stored.owner.clone();
             match self.furnish(owner.clone(), translator::Caller { user_id: translator::UserId(0), process_id: translator::ProcessId(0) }, stored.request) {
-                wire::Response::Furnished(_) => {}
-                wire::Response::Refused(refusal) => {
-                    self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                wire::Output::Furnished(_) => {}
+                wire::Output::Refused(refusal) => {
+                    self.event(owner, Frame::Changed(wire::Furnishing::RefurnishFailed(wire::RefurnishFailure {
                         workspace,
                         refusal_kind: refusal_kind(&refusal),
-                    }));
+                    })));
                 }
                 _ => {}
             }
@@ -3464,8 +3468,8 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         let Some(next_subscriber) = id.checked_add(1) else {
             return Err(memory_refusal(wire::MemoryOperation::Recording));
         };
-        let response = wire::Response::Subscribed(self.state(&owner));
-        let Some(initial) = self.next_event(owner.clone(), response) else {
+        let opened = Frame::Opened(wire::Workspaces(self.state(&owner)));
+        let Some(initial) = self.next_event(owner.clone(), opened) else {
             return Err(memory_refusal(wire::MemoryOperation::Recording));
         };
         self.next_subscriber = next_subscriber;
@@ -3497,21 +3501,23 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         furnished
     }
 
-    fn event(&mut self, owner: wire::Owner, response: wire::Response) {
-        let Some(event) = self.next_event(owner, response) else {
+    fn event(&mut self, owner: wire::Owner, frame: Frame) {
+        let Some(event) = self.next_event(owner, frame) else {
             return;
         };
         if self.persist().is_ok() {
+            let sequence = event.sequence;
             self.events.push(event);
+            self.announced.send_replace(sequence);
         } else {
             self.memory.next_event_sequence -= 1;
         }
     }
 
-    fn next_event(&mut self, owner: wire::Owner, response: wire::Response) -> Option<Event> {
+    fn next_event(&mut self, owner: wire::Owner, frame: Frame) -> Option<Event> {
         let sequence = self.memory.next_event_sequence;
         self.memory.next_event_sequence = sequence.checked_add(1)?;
-        Some(Event { sequence, owner, response })
+        Some(Event { sequence, owner, frame })
     }
 
     fn retry_pending_events(&mut self) {
@@ -3525,11 +3531,11 @@ impl<E: EmissionPort, M: MemoryStore> Daemon<E, M> {
         for workspace in workspaces {
             let owner = self.workspace(&workspace).map(|record| record.owner.clone());
             if let Some(response) = self.recover_one(&workspace) {
-                if let (wire::Response::Refused(refusal), Some(owner)) = (response, owner) {
-                    self.event(owner, wire::Response::RefurnishFailed(wire::RefurnishFailure {
+                if let (wire::Output::Refused(refusal), Some(owner)) = (response, owner) {
+                    self.event(owner, Frame::Changed(wire::Furnishing::RefurnishFailed(wire::RefurnishFailure {
                         workspace,
                         refusal_kind: refusal_kind(&refusal),
-                    }));
+                    })));
                 }
             }
         }

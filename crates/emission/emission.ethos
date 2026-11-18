@@ -13,8 +13,8 @@ Signal
   Cleaned.CleanupState
   CleanupRefused.FileFailure
   EmissionRefused.EmissionRefusal ]
-[ EmissionAttempt.{ ConfigurationRevision TranslatorConfiguration Query } ; one immutable attempt snapshot
-  EmissionAttemptOutcome.{ ConfigurationRevision Response } ; response revision equals its attempt
+[ EmissionAttempt.{ ConfigurationRevision TranslatorConfiguration Input } ; one immutable attempt snapshot
+  EmissionAttemptOutcome.{ ConfigurationRevision Output } ; response revision equals its attempt
   Content.String                                      ; types
   AbsolutePath.String
   ModuleSource.{ ModuleName RelativePath Option<Placement> Content }

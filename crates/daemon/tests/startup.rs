@@ -1,11 +1,12 @@
-//! Startup of the Nexus from a bootstrap: the envelope is admitted before the bootstrap is read,
-//! the bootstrap is validated before any effect, and the memory file is selected at the prepared
-//! Place under its exclusion before a socket is bound or the store is opened.
+//! Startup of the Nexus from a bootstrap: the bootstrap is validated before any effect, and the
+//! memory file is selected at the prepared Place under its exclusion before a socket is bound or
+//! the store is opened.
 
 use belief_nexus_daemon::{
     effective_user, BootstrapError, Daemon, DaemonBootstrap, EmissionPort, FileMemory, MemoryImage,
     MemoryStore, PreparesMemory,
 };
+use belief_nexus_wire::transport::{MemoryFileName, NexusBootstrap};
 use emission_belief_nexus as emission;
 use meta_signal_belief_nexus as meta;
 use signal::{ByteViewable, FrameBody, FrameCapacity, FrameWriting, Signalizable};
@@ -52,29 +53,25 @@ fn place(runtime: &Path, state: &Path) -> translator::Place {
     }
 }
 
-fn bootstrap(place: translator::Place, file: &str) -> meta::NexusBootstrap {
-    let runtime = PathBuf::from(&place.runtime.0);
-    let socket = |name: &str| meta::SocketPath(runtime.join(name).to_string_lossy().into_owned());
-    meta::NexusBootstrap {
-        ordinary_socket: meta::OrdinarySocket(socket("ordinary.sock")),
-        meta_socket: meta::MetaSocket(socket("meta.sock")),
-        emission_translator_socket: meta::EmissionTranslatorSocket(socket("translator.sock")),
+/// A bootstrap paired with this test process, which is alive for as long as the Nexus it starts.
+fn bootstrap(place: translator::Place, file: &str) -> NexusBootstrap {
+    NexusBootstrap {
         place,
-        memory_file_name: meta::MemoryFileName(file.into()),
-        admission: meta::Admission {
-            byte_limit: meta::ByteLimit(1_000_000),
-            timeout: meta::Timeout(1_000),
+        admission: nexus_exchange::Admission {
+            frame_deadline_milliseconds: nexus_exchange::FrameDeadlineMilliseconds(1_000),
+            frame_capacity_bytes: nexus_exchange::FrameCapacityBytes(1_000_000),
+            retry_delay_milliseconds: nexus_exchange::RetryDelayMilliseconds(25),
         },
-        paired_translator: meta::PairedTranslator {
+        peer_identity: translator::PeerIdentity {
             user_id: user(),
-            group_id: translator::GroupId(0),
-            process_id: translator::ProcessId(1),
+            process_id: translator::ProcessId(i64::from(std::process::id())),
         },
-        bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(user())),
+        owner: wire::Owner::Login(user()),
+        memory_file_name: MemoryFileName(file.into()),
     }
 }
 
-fn standard(tree: &Tree, file: &str) -> meta::NexusBootstrap {
+fn standard(tree: &Tree, file: &str) -> NexusBootstrap {
     bootstrap(place(&tree.runtime(), &tree.state()), file)
 }
 
@@ -356,29 +353,20 @@ fn nothing_made(tree: &Tree) -> bool {
 }
 
 #[test]
-fn a_bootstrap_without_the_right_envelope_is_refused_before_it_is_read() {
+fn a_frame_that_is_not_a_bootstrap_is_refused_before_it_is_read() {
     let tree = Tree::new();
-    let bytes = standard(&tree, "memory")
+    let mut first = spawn();
+    frame(&mut first, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    assert!(exits(&mut first), "a frame of no bootstrap is refused");
+    let mut bytes = standard(&tree, "memory")
         .signalize()
         .unwrap()
         .bytes()
         .to_vec();
-    let mut first = spawn();
-    frame(&mut first, bytes.clone());
-    frame(&mut first, bytes.clone());
-    assert!(
-        exits(&mut first),
-        "the bootstrap frame sent as the envelope is refused"
-    );
-    let mut flipped = <meta::NexusBootstrap as meta::Enveloped>::envelope();
-    flipped[0] ^= 1;
+    bytes.truncate(bytes.len() / 2);
     let mut second = spawn();
-    frame(&mut second, flipped);
     frame(&mut second, bytes);
-    assert!(
-        exits(&mut second),
-        "a digest of another contract is refused"
-    );
+    assert!(exits(&mut second), "a cut bootstrap is refused");
     let mut third = spawn();
     drop(third.stdin.take());
     assert!(exits(&mut third), "an empty pipe is refused");
@@ -391,25 +379,17 @@ fn a_bootstrap_without_the_right_envelope_is_refused_before_it_is_read() {
 #[test]
 fn an_invalid_direct_bootstrap_is_refused_with_no_directory_socket_or_store() {
     let tree = Tree::new();
-    let envelope = <meta::NexusBootstrap as meta::Enveloped>::envelope();
-    let mut outside = standard(&tree, "memory");
-    outside.ordinary_socket = meta::OrdinarySocket(meta::SocketPath(
-        tree.path()
-            .join("elsewhere.sock")
-            .to_string_lossy()
-            .into_owned(),
-    ));
     let mut other_owner = standard(&tree, "memory");
-    other_owner.bootstrap_owner =
-        meta::BootstrapOwner(wire::Owner::Login(translator::UserId(effective_user() + 1)));
+    other_owner.owner = wire::Owner::Login(translator::UserId(effective_user() + 1));
+    let mut unnormalized = standard(&tree, "memory");
+    unnormalized.place.runtime = translator::Runtime(format!("{}/./run", tree.path().display()));
     for value in [
         standard(&tree, ".."),
         standard(&tree, "memory.sema"),
-        outside,
+        unnormalized,
         other_owner,
     ] {
         let mut child = spawn();
-        frame(&mut child, envelope.clone());
         frame(&mut child, value.signalize().unwrap().bytes().to_vec());
         assert!(exits(&mut child), "{value:?}");
     }
@@ -427,12 +407,8 @@ fn a_valid_direct_bootstrap_does_prepare_and_bind() {
         "memory",
     );
     let mut child = spawn();
-    frame(
-        &mut child,
-        <meta::NexusBootstrap as meta::Enveloped>::envelope(),
-    );
     frame(&mut child, value.signalize().unwrap().bytes().to_vec());
-    let socket = tree.path().join("custom-run/ordinary.sock");
+    let socket = tree.path().join("custom-run/belief.sock");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -448,7 +424,7 @@ fn a_valid_direct_bootstrap_does_prepare_and_bind() {
 }
 
 /// The published 0.3.0 `NexusBootstrap`, field for field, from meta-signal-belief-nexus at
-/// `9c90892` src/lib.rs. One representative retained old frame, sent where the envelope belongs.
+/// `9c90892` src/lib.rs. One representative retained old frame, sent where the bootstrap belongs.
 mod previous {
     #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
     pub struct SocketPath(pub String);
@@ -525,7 +501,7 @@ fn a_retained_old_bootstrap_sent_as_the_first_frame_is_refused_before_any_effect
         .to_vec();
     let mut child = spawn();
     frame(&mut child, bytes);
-    assert!(exits(&mut child), "the old frame is not an envelope");
+    assert!(exits(&mut child), "the old frame is not a bootstrap");
     assert!(
         nothing_made(&tree),
         "no directory, socket or store was made"

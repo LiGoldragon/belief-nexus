@@ -1,13 +1,249 @@
+//! The real Nexus process, paired with this test process as its translator: its meta and public
+//! sockets speak the exchange layer (greet, Open, Answer, End), a Subscribe is answered with the
+//! frames of a stream, direct peers are admitted by their configured binding, and the state
+//! survives a restart.
+
+use belief_nexus_wire::transport::{MemoryFileName, NexusBootstrap};
+use belief_nexus_wire::{meta_call, public_call, BeliefNexus};
 use meta_signal_belief_nexus as meta;
-use signal::{
-    ByteViewable, FrameBody, FrameReading, FrameWriting, Restorable, Signal, Signalizable,
-};
+use nexus_exchange::lane::{Frame, Kind, Lane, LaneReading, LaneWriting};
+use nexus_querying::{Patience, Querying, QueryingConnection};
+use signal::{ByteViewable, Delivery, FrameBody, FrameWriting, Restorable, Signal, Signalizable};
 use signal_belief_nexus as wire;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+type SocketPaths = nexus_exchange::SocketPaths<BeliefNexus>;
+
+fn capacity() -> signal::FrameCapacity {
+    signal::FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES)
+}
+
+fn own_caller() -> translator::Caller {
+    translator::Caller {
+        user_id: translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
+        process_id: translator::ProcessId(i64::from(std::process::id())),
+    }
+}
+
+/// One public exchange: greet, open the call, read its one answer.
+fn public(socket: &Path, caller: translator::Caller, query: wire::Input) -> wire::Output {
+    let stream = UnixStream::connect(socket).unwrap();
+    let mut connection = QueryingConnection::<public_call::Input, public_call::Output>::greeted(
+        stream,
+        Patience::Until(Instant::now() + Duration::from_secs(30)),
+        capacity(),
+    )
+    .unwrap();
+    let exchange = connection
+        .open(public_call::Input::Call(public_call::Call_Data { caller, query }))
+        .unwrap();
+    match connection.delivery().unwrap() {
+        Some(Delivery::Answer(answer)) if answer.exchange == exchange => match answer.response {
+            public_call::Output::Answered(output) => output,
+            public_call::Output::Failed(message) => panic!("the Nexus failed: {message}"),
+        },
+        _ => panic!("the Nexus gave no answer"),
+    }
+}
+
+/// One meta exchange, as the paired translator.
+fn meta_exchange(socket: &Path, input: meta_call::Input) -> meta_call::Output {
+    let stream = UnixStream::connect(socket).unwrap();
+    let mut connection = QueryingConnection::<meta_call::Input, meta_call::Output>::greeted(
+        stream,
+        Patience::Until(Instant::now() + Duration::from_secs(30)),
+        capacity(),
+    )
+    .unwrap();
+    let exchange = connection.open(input).unwrap();
+    match connection.delivery().unwrap() {
+        Some(Delivery::Answer(answer)) if answer.exchange == exchange => answer.response,
+        _ => panic!("the Nexus gave no meta answer"),
+    }
+}
+
+fn configure(socket: &Path, revision: i64, set: meta::Set) -> meta::Output {
+    match meta_exchange(
+        socket,
+        meta_call::Input::Call(meta_call::Call_Data {
+            caller: own_caller(),
+            query: meta::Input::Configure(meta::ConfigureRequest {
+                configuration_revision_option: Some(meta::ConfigurationRevision(revision)),
+                set,
+            }),
+        }),
+    ) {
+        meta_call::Output::Answered(output) => output,
+        other => panic!("configuration revision {revision} was not answered: {other:?}"),
+    }
+}
+
+/// The paired translator's emission lane, answered with the real file emission.
+fn serve_emissions(socket: &Path) {
+    let listener = UnixListener::bind(socket).unwrap();
+    thread::spawn(move || {
+        let executor = emission_belief_nexus::FileEmission::new(PathBuf::from("git")).unwrap();
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let request = stream.read_lane_frame(signal::MAXIMUM_SIGNAL_BYTES).unwrap();
+            let attempt = Signal::<emission_belief_nexus::EmissionAttempt>::from(request.payload)
+                .restore()
+                .unwrap();
+            let outcome = emission_belief_nexus::EmissionAttemptOutcome {
+                configuration_revision: attempt.configuration_revision,
+                output: executor.execute(attempt.input),
+            };
+            stream
+                .write_lane_frame(
+                    &Frame {
+                        lane: Lane::EmissionSignal,
+                        kind: Kind::Answered,
+                        payload: outcome.signalize().unwrap().bytes().to_vec(),
+                    },
+                    signal::MAXIMUM_SIGNAL_BYTES,
+                )
+                .unwrap();
+        }
+    });
+}
+
+fn place(directory: &Path, name: &str) -> translator::Place {
+    translator::Place {
+        place_name: translator::PlaceName(name.into()),
+        runtime: translator::Runtime(directory.to_string_lossy().into_owned()),
+        state: translator::State(directory.to_string_lossy().into_owned()),
+    }
+}
+
+/// A bootstrap paired with this test process.
+fn bootstrap(place: translator::Place) -> NexusBootstrap {
+    let caller = own_caller();
+    NexusBootstrap {
+        place,
+        admission: nexus_exchange::Admission {
+            frame_deadline_milliseconds: nexus_exchange::FrameDeadlineMilliseconds(5_000),
+            frame_capacity_bytes: nexus_exchange::FrameCapacityBytes(1_000_000),
+            retry_delay_milliseconds: nexus_exchange::RetryDelayMilliseconds(25),
+        },
+        peer_identity: translator::PeerIdentity {
+            user_id: caller.user_id,
+            process_id: caller.process_id,
+        },
+        owner: wire::Owner::Login(caller.user_id),
+        memory_file_name: MemoryFileName("memory".into()),
+    }
+}
+
+fn spawn_nexus(bootstrap: &NexusBootstrap) -> Child {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_belief-nexus-daemon"))
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_frame(
+            &FrameBody::from(bootstrap.signalize().unwrap().bytes().to_vec()),
+            signal::FrameCapacity::default(),
+        )
+        .unwrap();
+    drop(child.stdin.take());
+    child
+}
+
+fn wait_for(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(path.exists(), "{} did not appear", path.display());
+}
+
+fn layout(settings: &str, instructions_setting: &str, instructions: &str, skills: &str) -> meta::Layout {
+    meta::Layout {
+        owned_root: meta::OwnedRoot(wire::RelativePath(".belief".into())),
+        generations_directory: meta::GenerationsDirectory(wire::RelativePath("generations".into())),
+        current_link: meta::CurrentLink(wire::RelativePath("current".into())),
+        settings_file: meta::SettingsFile(wire::RelativePath(settings.into())),
+        instructions_setting: meta::InstructionsSetting(instructions_setting.into()),
+        instructions_file: meta::InstructionsFile(wire::RelativePath(instructions.into())),
+        skills_directory: meta::SkillsDirectory(wire::RelativePath(skills.into())),
+    }
+}
+
+/// Every setting a ready Nexus needs, its ordinary peers as given.
+fn ready_sets(ordinary_peers: Vec<translator::PeerBinding>) -> Vec<meta::Set> {
+    let caller = own_caller();
+    let identity = translator::PeerBinding {
+        peer_id: translator::PeerId("process-test".into()),
+        peer_identity: translator::PeerIdentity {
+            user_id: caller.user_id,
+            process_id: caller.process_id,
+        },
+    };
+    vec![
+        meta::Set::RepositoryPolling(meta::Timeout(20)),
+        meta::Set::SubscriberCapacity(2),
+        meta::Set::OrdinaryPeers(wire::PeerList(ordinary_peers)),
+        meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
+        meta::Set::HarnessLayout(meta::HarnessLayout {
+            harness: wire::Harness::Codex,
+            layout: layout(".codex/config.toml", "model_instructions_file", "instructions.md", ".agents/skills"),
+        }),
+        meta::Set::HarnessLayout(meta::HarnessLayout {
+            harness: wire::Harness::Claude,
+            layout: layout("CLAUDE.md", "unused-for-claude", "CLAUDE.md", ".claude/skills"),
+        }),
+        meta::Set::PlacementDefault(meta::PlacementDefault {
+            kind: wire::Kind::Spirit,
+            placement: wire::Placement::SystemPrompt,
+        }),
+        meta::Set::PlacementDefault(meta::PlacementDefault {
+            kind: wire::Kind::Knowledge,
+            placement: wire::Placement::Skills,
+        }),
+        meta::Set::NexusFrameCapacity(meta::ByteLimit(1_000_000)),
+        meta::Set::NexusTransportTimeout(meta::Timeout(1_000)),
+        meta::Set::NexusSocket(meta::SocketPath("unused".into())),
+        meta::Set::MetaNexusSocket(meta::SocketPath("unused-meta".into())),
+        meta::Set::CallTimeout(meta::Timeout(1_000)),
+        meta::Set::OutputLimit(meta::ByteLimit(1_000_000)),
+        meta::Set::TextBudget(meta::Budget {
+            node_limit: meta::NodeLimit(10_000),
+            depth_limit: meta::DepthLimit(100),
+        }),
+        meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1_000_000)),
+        meta::Set::TranslatorTransportTimeout(meta::Timeout(1_000)),
+        meta::Set::AllowedNexusPeers(wire::PeerList(vec![identity])),
+        meta::Set::GitExecutable(wire::ExecutablePath("git".into())),
+    ]
+}
+
+fn repository_fixture(repository: &Path) {
+    std::fs::create_dir_all(repository.join("spirit")).unwrap();
+    std::fs::create_dir_all(repository.join("knowledge")).unwrap();
+    std::fs::write(repository.join("spirit/core.md"), "The exact Claude bundle witness is CLAUDE_BUNDLE_WITNESS.\n").unwrap();
+    std::fs::write(repository.join("knowledge/witness.md"), "---\nname: knowledge-witness\ndescription: Use for the Belief Nexus Claude proof.\n---\nState the exact skill witness CLAUDE_SKILL_WITNESS.\n").unwrap();
+    for args in [["init", "-b", "main"].as_slice(), ["config", "user.email", "belief@example.test"].as_slice(), ["config", "user.name", "Belief Test"].as_slice(), ["add", "."].as_slice(), ["commit", "-m", "fixture"].as_slice()] {
+        assert!(Command::new("git").arg("-C").arg(repository).args(args).status().unwrap().success());
+    }
+}
+
+fn furnish_request(workspace: &Path, harness: wire::Harness, names: &[(wire::Kind, &str)]) -> wire::Input {
+    wire::Input::Furnish(wire::FurnishRequest {
+        workspace: wire::Workspace(wire::WorkspacePath(workspace.to_string_lossy().into_owned())),
+        harness,
+        module_name_vector: names
+            .iter()
+            .map(|(kind, subject)| wire::ModuleName { kind: kind.clone(), subject: wire::Subject((*subject).into()) })
+            .collect(),
+    })
+}
 
 #[test]
 fn direct_peer_child() {
@@ -18,171 +254,54 @@ fn direct_peer_child() {
         thread::sleep(Duration::from_millis(2));
     }
     assert!(gate.exists(), "direct peer gate never opened");
-    let caller = translator::Caller {
-        user_id: translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
-        process_id: translator::ProcessId(i64::from(std::process::id())),
-    };
+    let caller = own_caller();
+    let socket = Path::new(&socket);
     let authorized = std::env::var_os("BELIEF_DIRECT_PEER_AUTHORIZED").is_some();
     if authorized {
         let repository = wire::Repository(wire::RepositoryPath(std::env::var("BELIEF_DIRECT_REPOSITORY").unwrap()));
-        let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller: caller.clone(), query: wire::Query::Register(repository) });
-        assert!(matches!(response, wire::Response::Registered(_)), "configured direct Register failed: {response:?}");
-        let workspace = wire::Workspace(wire::WorkspacePath(std::env::var("BELIEF_DIRECT_WORKSPACE").unwrap()));
-        let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller: caller.clone(), query: wire::Query::Furnish(wire::FurnishRequest {
-            workspace: workspace.clone(), harness: wire::Harness::Codex,
-            module_name_vector: vec![wire::ModuleName { kind: wire::Kind::Spirit, subject: wire::Subject("core".into()) }],
-        }) });
-        let wire::Response::Furnished(furnished) = response else { panic!("configured direct Furnish failed: {response:?}") };
-        assert_eq!(furnished.workspace, workspace);
+        let response = public(socket, caller.clone(), wire::Input::Register(repository));
+        assert!(matches!(response, wire::Output::Registered(_)), "configured direct Register failed: {response:?}");
+        let workspace = PathBuf::from(std::env::var("BELIEF_DIRECT_WORKSPACE").unwrap());
+        let response = public(socket, caller.clone(), furnish_request(&workspace, wire::Harness::Codex, &[(wire::Kind::Spirit, "core")]));
+        let wire::Output::Furnished(furnished) = response else { panic!("configured direct Furnish failed: {response:?}") };
+        assert_eq!(furnished.workspace.0 .0, workspace.to_string_lossy());
         assert!(Path::new(&(furnished.furnished_paths.system_prompt_path.0)).exists());
-        assert_eq!(
-            PathBuf::from(&furnished.furnished_paths.skills_path.0),
-            PathBuf::from(&workspace.0 .0).join(".agents/skills"),
-        );
+        assert_eq!(PathBuf::from(&furnished.furnished_paths.skills_path.0), workspace.join(".agents/skills"));
         assert!(Path::new(&(furnished.furnished_paths.skills_path.0)).exists());
-        let claude_workspace = wire::Workspace(wire::WorkspacePath(std::env::var("BELIEF_DIRECT_CLAUDE_WORKSPACE").unwrap()));
-        let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller, query: wire::Query::Furnish(wire::FurnishRequest {
-            workspace: claude_workspace.clone(), harness: wire::Harness::Claude,
-            module_name_vector: vec![
-                wire::ModuleName { kind: wire::Kind::Spirit, subject: wire::Subject("core".into()) },
-                wire::ModuleName { kind: wire::Kind::Knowledge, subject: wire::Subject("witness".into()) },
-            ],
-        }) });
-        let wire::Response::Furnished(furnished) = response else { panic!("configured direct Claude Furnish failed: {response:?}") };
-        assert_eq!(furnished.workspace, claude_workspace);
+        let claude_workspace = PathBuf::from(std::env::var("BELIEF_DIRECT_CLAUDE_WORKSPACE").unwrap());
+        let response = public(socket, caller, furnish_request(&claude_workspace, wire::Harness::Claude, &[(wire::Kind::Spirit, "core"), (wire::Kind::Knowledge, "witness")]));
+        let wire::Output::Furnished(furnished) = response else { panic!("configured direct Claude Furnish failed: {response:?}") };
+        assert_eq!(furnished.workspace.0 .0, claude_workspace.to_string_lossy());
         assert!(Path::new(&(furnished.furnished_paths.system_prompt_path.0)).exists());
-        assert_eq!(
-            PathBuf::from(&furnished.furnished_paths.skills_path.0),
-            PathBuf::from(&claude_workspace.0 .0).join(".claude/skills"),
-        );
+        assert_eq!(PathBuf::from(&furnished.furnished_paths.skills_path.0), claude_workspace.join(".claude/skills"));
         assert!(Path::new(&(furnished.furnished_paths.skills_path.0)).exists());
     } else {
-        let workspace = wire::Workspace(wire::WorkspacePath(std::env::var("BELIEF_DIRECT_WORKSPACE").unwrap()));
-        let response: wire::Response = exchange(Path::new(&socket), &wire::Call { caller, query: wire::Query::Furnish(wire::FurnishRequest {
-            workspace, harness: wire::Harness::Codex,
-            module_name_vector: vec![wire::ModuleName { kind: wire::Kind::Spirit, subject: wire::Subject("core".into()) }],
-        }) });
-        assert!(matches!(response, wire::Response::Refused(wire::Refusal::NotAuthorized(_))), "unconfigured direct peer was admitted: {response:?}");
+        let workspace = PathBuf::from(std::env::var("BELIEF_DIRECT_WORKSPACE").unwrap());
+        let response = public(socket, caller, furnish_request(&workspace, wire::Harness::Codex, &[(wire::Kind::Spirit, "core")]));
+        assert!(matches!(response, wire::Output::Refused(wire::Refusal::NotAuthorized(_))), "unconfigured direct peer was admitted: {response:?}");
     }
-}
-
-fn exchange<Q: Signalizable, R>(path: &Path, query: &Q) -> R
-where
-    Signal<R>: Restorable<R>,
-{
-    let mut stream = UnixStream::connect(path).unwrap();
-    let signal = query.signalize().unwrap();
-    stream
-        .write_frame(
-            &FrameBody::from(signal.bytes().to_vec()),
-            signal::FrameCapacity::default(),
-        )
-        .unwrap();
-    let body = stream.read_frame(signal::FrameCapacity::default()).unwrap();
-    Signal::<R>::from(Vec::<u8>::from(body)).restore().unwrap()
 }
 
 #[test]
 fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
     let directory = tempfile::tempdir().unwrap();
-    let caller = translator::Caller {
-        user_id: translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
-        process_id: translator::ProcessId(i64::from(std::process::id())),
-    };
-    let identity = translator::PeerBinding { peer_id: translator::PeerId("process-test".into()), peer_identity: translator::PeerIdentity { user_id: caller.user_id, process_id: caller.process_id } };
-    let ordinary = directory.path().join("ordinary.sock");
-    let privileged = directory.path().join("meta.sock");
-    let emission_socket = directory.path().join("translator.sock");
-    let emission_listener = UnixListener::bind(&emission_socket).unwrap();
-    emission_listener.set_nonblocking(true).unwrap();
-    let emission_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let emission_running = emission_stop.clone();
-    let emission_thread = thread::spawn(move || {
-        let executor = emission_belief_nexus::FileEmission::new(std::path::PathBuf::from("git")).unwrap();
-        while !emission_running.load(std::sync::atomic::Ordering::Acquire) {
-            match emission_listener.accept() {
-                Ok((mut stream, _)) => {
-                    let body = stream.read_frame(signal::FrameCapacity::default()).unwrap();
-                    let attempt = Signal::<emission_belief_nexus::EmissionAttempt>::from(Vec::<u8>::from(body)).restore().unwrap();
-                    let outcome = emission_belief_nexus::EmissionAttemptOutcome { configuration_revision: attempt.configuration_revision, response: executor.execute(attempt.query) };
-                    let archived = outcome.signalize().unwrap();
-                    stream.write_frame(&FrameBody::from(archived.bytes().to_vec()), signal::FrameCapacity::default()).unwrap();
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(2)),
-                Err(error) => panic!("emission listener: {error}"),
-            }
-        }
-    });
-    let bootstrap = meta::NexusBootstrap {
-        ordinary_socket: meta::OrdinarySocket(meta::SocketPath(
-            ordinary.to_string_lossy().into_owned(),
-        )),
-        meta_socket: meta::MetaSocket(meta::SocketPath(privileged.to_string_lossy().into_owned())),
-        emission_translator_socket: meta::EmissionTranslatorSocket(meta::SocketPath(emission_socket.to_string_lossy().into_owned())),
-        place: translator::Place {
-            place_name: translator::PlaceName("process".into()),
-            runtime: translator::Runtime(directory.path().to_string_lossy().into_owned()),
-            state: translator::State(directory.path().to_string_lossy().into_owned()),
-        },
-        memory_file_name: meta::MemoryFileName("memory".into()),
-        admission: meta::Admission {
-            byte_limit: meta::ByteLimit(1_000_000),
-            timeout: meta::Timeout(1_000),
-        },
-        paired_translator: meta::PairedTranslator {
-            user_id: caller.user_id,
-            group_id: translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
-            process_id: caller.process_id,
-        },
-        bootstrap_owner: meta::BootstrapOwner(wire::Owner::Login(caller.user_id)),
-    };
-    let mut child = Command::new(env!("CARGO_BIN_EXE_belief-nexus-daemon"))
-        .stdin(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let signal = bootstrap.signalize().unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_frame(
-            &FrameBody::from(<meta::NexusBootstrap as meta::Enveloped>::envelope()),
-            signal::FrameCapacity::default(),
-        )
-        .unwrap();
-    child
-        .stdin
-        .as_mut()
-        .unwrap()
-        .write_frame(
-            &FrameBody::from(signal.bytes().to_vec()),
-            signal::FrameCapacity::default(),
-        )
-        .unwrap();
-    drop(child.stdin.take());
-    for _ in 0..100 {
-        if privileged.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+    let bootstrap = bootstrap(place(directory.path(), "process"));
+    let paths = SocketPaths::from(&bootstrap.place);
+    serve_emissions(&paths.translator);
+    let mut child = spawn_nexus(&bootstrap);
+    wait_for(&paths.meta);
+    wait_for(&paths.public);
     let repository = directory.path().join("beliefs");
     let workspace = directory.path().join("workspace");
     let claude_workspace = directory.path().join("claude-workspace");
-    std::fs::create_dir_all(repository.join("spirit")).unwrap();
-    std::fs::create_dir_all(repository.join("knowledge")).unwrap();
+    repository_fixture(&repository);
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::create_dir_all(&claude_workspace).unwrap();
-    std::fs::write(repository.join("spirit/core.md"), "The exact Claude bundle witness is CLAUDE_BUNDLE_WITNESS.\n").unwrap();
-    std::fs::write(repository.join("knowledge/witness.md"), "---\nname: knowledge-witness\ndescription: Use for the Belief Nexus Claude proof.\n---\nState the exact skill witness CLAUDE_SKILL_WITNESS.\n").unwrap();
-    for args in [["init", "-b", "main"].as_slice(), ["config", "user.email", "belief@example.test"].as_slice(), ["config", "user.name", "Belief Test"].as_slice(), ["add", "."].as_slice(), ["commit", "-m", "fixture"].as_slice()] {
-        assert!(Command::new("git").arg("-C").arg(&repository).args(args).status().unwrap().success());
-    }
     let current = std::env::current_exe().unwrap();
     let authorized_gate = directory.path().join("authorized.gate");
     let mut authorized = Command::new(&current)
         .args(["--exact", "direct_peer_child", "--nocapture"])
-        .env("BELIEF_DIRECT_PEER_SOCKET", &ordinary)
+        .env("BELIEF_DIRECT_PEER_SOCKET", &paths.public)
         .env("BELIEF_DIRECT_PEER_GATE", &authorized_gate)
         .env("BELIEF_DIRECT_PEER_AUTHORIZED", "1")
         .env("BELIEF_DIRECT_REPOSITORY", &repository)
@@ -196,34 +315,9 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
             process_id: translator::ProcessId(i64::from(authorized.id())),
         },
     };
-    let layout = meta::Layout {
-        owned_root: meta::OwnedRoot(wire::RelativePath(".belief".into())), generations_directory: meta::GenerationsDirectory(wire::RelativePath("generations".into())),
-        current_link: meta::CurrentLink(wire::RelativePath("current".into())), settings_file: meta::SettingsFile(wire::RelativePath(".codex/config.toml".into())),
-        instructions_setting: meta::InstructionsSetting("model_instructions_file".into()), instructions_file: meta::InstructionsFile(wire::RelativePath("instructions.md".into())),
-        skills_directory: meta::SkillsDirectory(wire::RelativePath(".agents/skills".into())),
-    };
-    let sets = vec![
-        meta::Set::RepositoryPolling(meta::Timeout(20)), meta::Set::SubscriberCapacity(2),
-        meta::Set::OrdinaryPeers(wire::PeerList(vec![binding])), meta::Set::MetaPeers(wire::PeerList(vec![identity.clone()])),
-        meta::Set::HarnessLayout(meta::HarnessLayout { harness: wire::Harness::Codex, layout }),
-        meta::Set::HarnessLayout(meta::HarnessLayout { harness: wire::Harness::Claude, layout: meta::Layout {
-            owned_root: meta::OwnedRoot(wire::RelativePath(".belief".into())), generations_directory: meta::GenerationsDirectory(wire::RelativePath("generations".into())),
-            current_link: meta::CurrentLink(wire::RelativePath("current".into())), settings_file: meta::SettingsFile(wire::RelativePath("CLAUDE.md".into())),
-            instructions_setting: meta::InstructionsSetting("unused-for-claude".into()), instructions_file: meta::InstructionsFile(wire::RelativePath("CLAUDE.md".into())),
-            skills_directory: meta::SkillsDirectory(wire::RelativePath(".claude/skills".into())),
-        } }),
-        meta::Set::PlacementDefault(meta::PlacementDefault { kind: wire::Kind::Spirit, placement: wire::Placement::SystemPrompt }),
-        meta::Set::PlacementDefault(meta::PlacementDefault { kind: wire::Kind::Knowledge, placement: wire::Placement::Skills }),
-        meta::Set::NexusFrameCapacity(meta::ByteLimit(1_000_000)), meta::Set::NexusTransportTimeout(meta::Timeout(1_000)),
-        meta::Set::NexusSocket(meta::SocketPath("unused".into())), meta::Set::MetaNexusSocket(meta::SocketPath("unused-meta".into())),
-        meta::Set::CallTimeout(meta::Timeout(1_000)), meta::Set::OutputLimit(meta::ByteLimit(1_000_000)),
-        meta::Set::TextBudget(meta::Budget { node_limit: meta::NodeLimit(10_000), depth_limit: meta::DepthLimit(100) }),
-        meta::Set::TranslatorFrameCapacity(meta::ByteLimit(1_000_000)), meta::Set::TranslatorTransportTimeout(meta::Timeout(1_000)),
-        meta::Set::AllowedNexusPeers(wire::PeerList(vec![identity.clone()])), meta::Set::GitExecutable(wire::ExecutablePath("git".into())),
-    ];
-    for (revision, set) in sets.into_iter().enumerate() {
-        let configured: meta::MetaTransportOutput = exchange(&privileged, &meta::MetaTransportInput::Call(meta::MetaCall { caller: caller.clone(), query: meta::Query::Configure(meta::ConfigureRequest { configuration_revision_option: Some(meta::ConfigurationRevision(revision as i64)), set }) }));
-        assert!(matches!(configured, meta::MetaTransportOutput::Answered(meta::Response::Configured(_))), "configuration revision {revision} failed: {configured:?}");
+    for (revision, set) in ready_sets(vec![binding]).into_iter().enumerate() {
+        let configured = configure(&paths.meta, revision as i64, set);
+        assert!(matches!(configured, meta::Output::Configured(_)), "configuration revision {revision} failed: {configured:?}");
     }
     std::fs::write(&authorized_gate, b"go").unwrap();
     assert!(authorized.wait().unwrap().success(), "configured direct peer process failed");
@@ -242,7 +336,7 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
     let refused_gate = directory.path().join("refused.gate");
     let mut refused = Command::new(&current)
         .args(["--exact", "direct_peer_child", "--nocapture"])
-        .env("BELIEF_DIRECT_PEER_SOCKET", &ordinary)
+        .env("BELIEF_DIRECT_PEER_SOCKET", &paths.public)
         .env("BELIEF_DIRECT_PEER_GATE", &refused_gate)
         .env("BELIEF_DIRECT_WORKSPACE", &workspace)
         .spawn().unwrap();
@@ -250,6 +344,132 @@ fn nexus_process_serves_authenticated_meta_and_ordinary_signal() {
     assert!(refused.wait().unwrap().success(), "unconfigured direct peer process did not receive typed refusal");
     child.kill().unwrap();
     child.wait().unwrap();
-    emission_stop.store(true, std::sync::atomic::Ordering::Release);
-    emission_thread.join().unwrap();
+}
+
+#[test]
+fn every_exchange_is_answered_on_its_own_identifier_and_the_translator_restores_its_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let bootstrap = bootstrap(place(directory.path(), "exchange"));
+    let paths = SocketPaths::from(&bootstrap.place);
+    serve_emissions(&paths.translator);
+    let mut child = spawn_nexus(&bootstrap);
+    wait_for(&paths.meta);
+    wait_for(&paths.public);
+    assert!(
+        matches!(public(&paths.public, own_caller(), wire::Input::Resolve(Vec::new())), wire::Output::Refused(wire::Refusal::NotReady)),
+        "an unconfigured Nexus answers NotReady"
+    );
+    for (revision, set) in ready_sets(Vec::new()).into_iter().enumerate() {
+        assert!(matches!(configure(&paths.meta, revision as i64, set), meta::Output::Configured(_)));
+    }
+    let stale = configure(&paths.meta, 0, meta::Set::RepositoryPolling(meta::Timeout(25)));
+    assert!(matches!(stale, meta::Output::ConfigureRefused(meta::ConfigurationRefusal::StaleRevision(_))), "{stale:?}");
+    let restored = meta_exchange(&paths.meta, meta_call::Input::RestoreTranslatorConfiguration);
+    let meta_call::Output::Restored(snapshot) = restored else { panic!("no translator settings restored: {restored:?}") };
+    assert_eq!(snapshot.readiness, meta::Readiness::Ready);
+    assert_eq!(snapshot.set_vector.len(), 9, "the nine translator-kept settings: {snapshot:?}");
+
+    // Two exchanges open on one connection are each answered on their own identifier.
+    let stream = UnixStream::connect(&paths.public).unwrap();
+    let mut connection = QueryingConnection::<public_call::Input, public_call::Output>::greeted(
+        stream,
+        Patience::Until(Instant::now() + Duration::from_secs(30)),
+        capacity(),
+    )
+    .unwrap();
+    let call = |query| public_call::Input::Call(public_call::Call_Data { caller: own_caller(), query });
+    let first = connection.open(call(wire::Input::Resolve(Vec::new()))).unwrap();
+    let second = connection.open(call(wire::Input::Resolve(Vec::new()))).unwrap();
+    assert_ne!(first, second);
+    let mut answered = Vec::new();
+    while answered.len() < 2 {
+        match connection.delivery().unwrap() {
+            Some(Delivery::Answer(answer)) => {
+                assert!(matches!(answer.response, public_call::Output::Answered(wire::Output::Resolved(_))));
+                answered.push(answer.exchange);
+            }
+            Some(_) => {}
+            None => panic!("the connection closed before both answers"),
+        }
+    }
+    assert!(answered.contains(&first) && answered.contains(&second));
+    drop(connection);
+
+    // A connection that does not greet first is ended.
+    let mut ungreeted = UnixStream::connect(&paths.public).unwrap();
+    let opening = signal::Dispatch::Open(signal::Opening { exchange: first, query: call(wire::Input::Resolve(Vec::new())) });
+    ungreeted.write_frame(&FrameBody::from(opening.signalize().unwrap().bytes().to_vec()), capacity()).unwrap();
+    ungreeted.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut ending = Vec::new();
+    std::io::Read::read_to_end(&mut ungreeted, &mut ending).unwrap();
+    assert!(!ending.is_empty(), "the connection is ended with the fault it names");
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn a_subscription_streams_its_frames_and_the_state_survives_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let bootstrap = bootstrap(place(directory.path(), "stream"));
+    let paths = SocketPaths::from(&bootstrap.place);
+    serve_emissions(&paths.translator);
+    let mut child = spawn_nexus(&bootstrap);
+    wait_for(&paths.meta);
+    wait_for(&paths.public);
+    for (revision, set) in ready_sets(Vec::new()).into_iter().enumerate() {
+        assert!(matches!(configure(&paths.meta, revision as i64, set), meta::Output::Configured(_)));
+    }
+    let repository = directory.path().join("beliefs");
+    repository_fixture(&repository);
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let registered = public(&paths.public, own_caller(), wire::Input::Register(wire::Repository(wire::RepositoryPath(repository.to_string_lossy().into_owned()))));
+    assert!(matches!(registered, wire::Output::Registered(_)), "{registered:?}");
+    let furnished = public(&paths.public, own_caller(), furnish_request(&first, wire::Harness::Codex, &[(wire::Kind::Spirit, "core")]));
+    assert!(matches!(furnished, wire::Output::Furnished(_)), "{furnished:?}");
+
+    let stream = UnixStream::connect(&paths.public).unwrap();
+    let mut subscription = QueryingConnection::<public_call::Input, public_call::Output>::greeted(
+        stream,
+        Patience::Until(Instant::now() + Duration::from_secs(30)),
+        capacity(),
+    )
+    .unwrap();
+    let exchange = subscription
+        .open(public_call::Input::Call(public_call::Call_Data { caller: own_caller(), query: wire::Input::Subscribe }))
+        .unwrap();
+    let mut frame = || match subscription.delivery().unwrap() {
+        Some(Delivery::Answer(answer)) if answer.exchange == exchange => match answer.response {
+            public_call::Output::Answered(wire::Output::Subscribed(frame)) => frame,
+            other => panic!("a subscription answered something else: {other:?}"),
+        },
+        _ => panic!("the subscription gave no frame"),
+    };
+    let signal::Frame::Opened(wire::Workspaces(opened)) = frame() else { panic!("the first frame is not Opened") };
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].workspace.0 .0, first.to_string_lossy());
+
+    let furnished = public(&paths.public, own_caller(), furnish_request(&second, wire::Harness::Codex, &[(wire::Kind::Spirit, "core")]));
+    assert!(matches!(furnished, wire::Output::Furnished(_)), "{furnished:?}");
+    let signal::Frame::Changed(wire::Furnishing::Furnished(changed)) = frame() else { panic!("the next frame is not the furnishing") };
+    assert_eq!(changed.workspace.0 .0, second.to_string_lossy());
+    drop(subscription);
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+    for socket in [&paths.public, &paths.meta] {
+        if socket.exists() {
+            std::fs::remove_file(socket).unwrap();
+        }
+    }
+    let mut restarted = spawn_nexus(&bootstrap);
+    wait_for(&paths.public);
+    let resolved = public(&paths.public, own_caller(), wire::Input::Resolve(vec![wire::ModuleName { kind: wire::Kind::Spirit, subject: wire::Subject("core".into()) }]));
+    let wire::Output::Resolved(resolution) = resolved else { panic!("the restarted Nexus did not resolve: {resolved:?}") };
+    assert_eq!(resolution.found.0.len(), 1, "the registered repository survived the restart");
+    restarted.kill().unwrap();
+    restarted.wait().unwrap();
 }

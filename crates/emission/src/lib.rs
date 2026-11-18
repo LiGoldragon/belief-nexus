@@ -10,14 +10,14 @@
 pub struct EmissionAttempt {
     pub configuration_revision: meta_signal_belief_nexus::ConfigurationRevision,
     pub translator_configuration: meta_signal_belief_nexus::TranslatorConfiguration,
-    pub query: Query,
+    pub input: Input,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct EmissionAttemptOutcome {
     pub configuration_revision: meta_signal_belief_nexus::ConfigurationRevision,
-    pub response: Response,
+    pub output: Output,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -277,7 +277,7 @@ pub enum EmissionRefusal {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum Query {
+pub enum Input {
     Snapshot(signal_belief_nexus::Repository),
     Publish(Publication),
     InspectPublication(InspectionRequest),
@@ -286,7 +286,7 @@ pub enum Query {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub enum Response {
+pub enum Output {
     Snapshotted(SourceSnapshot),
     Published(PublicationState),
     Inspected(PublicationInspection),
@@ -294,9 +294,58 @@ pub enum Response {
     CleanupRefused(signal_belief_nexus::FileFailure),
     EmissionRefused(EmissionRefusal),
 }
+#[rustfmt::skip]
+#[allow(clippy::result_large_err, clippy::ptr_arg, clippy::borrowed_box)]
+pub trait Answering {
+    fn snapshot(
+        &self,
+        repository: &signal_belief_nexus::Repository,
+    ) -> std::result::Result<SourceSnapshot, Output>;
+    fn publish(
+        &self,
+        publication: &Publication,
+    ) -> std::result::Result<PublicationState, Output>;
+    fn inspect_publication(
+        &self,
+        inspection_request: &InspectionRequest,
+    ) -> std::result::Result<PublicationInspection, Output>;
+    fn clean(
+        &self,
+        cleanup_request: &CleanupRequest,
+    ) -> std::result::Result<CleanupState, Output>;
+}
+#[rustfmt::skip]
+pub trait Answerable {
+    type Answer;
+    fn answer<Nexus: Answering>(&self, nexus: &Nexus) -> Self::Answer;
+}
+#[rustfmt::skip]
+impl Answerable for Input {
+    type Answer = Output;
+    fn answer<Nexus: Answering>(&self, nexus: &Nexus) -> Output {
+        match self {
+            Input::Snapshot(carried) => {
+                nexus
+                    .snapshot(carried)
+                    .map_or_else(|refusal| refusal, Output::Snapshotted)
+            }
+            Input::Publish(carried) => {
+                nexus.publish(carried).map_or_else(|refusal| refusal, Output::Published)
+            }
+            Input::InspectPublication(carried) => {
+                nexus
+                    .inspect_publication(carried)
+                    .map_or_else(|refusal| refusal, Output::Inspected)
+            }
+            Input::Clean(carried) => {
+                nexus.clean(carried).map_or_else(|refusal| refusal, Output::Cleaned)
+            }
+        }
+    }
+}
 pub const ETHOS: &str = include_str!("../emission.ethos");
 
-impl signal::Contracted for Query {
+impl signal::Contracted for Input {
     const CONTRACT_SOURCE: &'static str = ETHOS;
 }
 
@@ -312,7 +361,7 @@ use std::process::Command;
 ///
 /// The executable is supplied configuration. Each publication carries the
 /// coherent retention policy selected by the Nexus. The Nexus sends only
-/// typed `Query` values and never observes command lines or paths
+/// typed `Input` values and never observes command lines or paths
 /// that have not passed through this boundary.
 #[derive(Clone, Debug)]
 pub struct FileEmission {
@@ -325,19 +374,19 @@ impl FileEmission {
         Ok(Self { git_executable })
     }
 
-    pub fn execute(&self, query: Query) -> Response {
+    pub fn execute(&self, query: Input) -> Output {
         match query {
-            Query::Snapshot(repository) => self.snapshot(repository),
-            Query::Publish(publication) => self.publish(publication),
-            Query::InspectPublication(request) => self.inspect(request),
-            Query::Clean(request) => self.clean(request),
+            Input::Snapshot(repository) => self.snapshot(repository),
+            Input::Publish(publication) => self.publish(publication),
+            Input::InspectPublication(request) => self.inspect(request),
+            Input::Clean(request) => self.clean(request),
         }
     }
 
-    fn snapshot(&self, repository: signal_belief_nexus::Repository) -> Response {
+    fn snapshot(&self, repository: signal_belief_nexus::Repository) -> Output {
         match self.snapshot_result(repository.clone()) {
-            Ok(snapshot) => Response::Snapshotted(snapshot),
-            Err(refusal) => Response::EmissionRefused(EmissionRefusal::Source(refusal)),
+            Ok(snapshot) => Output::Snapshotted(snapshot),
+            Err(refusal) => Output::EmissionRefused(EmissionRefusal::Source(refusal)),
         }
     }
 
@@ -467,10 +516,10 @@ impl FileEmission {
         }
     }
 
-    fn publish(&self, publication: Publication) -> Response {
+    fn publish(&self, publication: Publication) -> Output {
         match self.publish_result(&publication) {
-            Ok(state) => Response::Published(state),
-            Err(refusal) => Response::EmissionRefused(EmissionRefusal::PublicationFailed(refusal)),
+            Ok(state) => Output::Published(state),
+            Err(refusal) => Output::EmissionRefused(EmissionRefusal::PublicationFailed(refusal)),
         }
     }
 
@@ -528,40 +577,40 @@ impl FileEmission {
         })
     }
 
-    fn inspect(&self, request: InspectionRequest) -> Response {
+    fn inspect(&self, request: InspectionRequest) -> Output {
         let workspace = PathBuf::from(&((request.workspace.0).0));
         let paths = match PublicationPaths::new(&workspace, &request.layout) {
             Ok(paths) => paths,
-            Err(evidence) => return Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
+            Err(evidence) => return Output::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                 workspace: request.workspace,
                 publication_operation: PublicationOperation::InspectingPointer,
                 publication_evidence: evidence,
             })),
         };
         if let Err(refusal) = paths.resolve_publication(&request.publication_identity, &request.workspace) {
-            return Response::EmissionRefused(EmissionRefusal::PublicationFailed(refusal));
+            return Output::EmissionRefused(EmissionRefusal::PublicationFailed(refusal));
         }
         match paths.inspect_untrusted(&request.workspace) {
-            Ok((pointer, manifest)) => Response::Inspected(PublicationInspection {
+            Ok((pointer, manifest)) => Output::Inspected(PublicationInspection {
                 workspace: request.workspace,
                 publication_identity_option: pointer,
                 publication_manifest_option: manifest,
             }),
-            Err(refusal) => Response::EmissionRefused(EmissionRefusal::PublicationFailed(refusal)),
+            Err(refusal) => Output::EmissionRefused(EmissionRefusal::PublicationFailed(refusal)),
         }
     }
 
-    fn clean(&self, request: CleanupRequest) -> Response {
+    fn clean(&self, request: CleanupRequest) -> Output {
         let workspace = PathBuf::from(&((request.workspace.0).0));
         let paths = match PublicationPaths::new(&workspace, &request.layout) {
             Ok(paths) => paths,
-            Err(evidence) => return Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
+            Err(evidence) => return Output::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         };
         match paths.cleanup(&request.publication_identity, &request.workspace) {
-            Ok(cleanup_outcome) => Response::Cleaned(CleanupState {
+            Ok(cleanup_outcome) => Output::Cleaned(CleanupState {
                 workspace: request.workspace, publication_identity: request.publication_identity, cleanup_outcome,
             }),
-            Err(evidence) => Response::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
+            Err(evidence) => Output::CleanupRefused(cleanup_failure(&request.workspace, evidence)),
         }
     }
 }
@@ -1227,14 +1276,14 @@ mod tests {
             missing_modules: MissingModules(vec![ModuleName { kind: Kind::Vision, subject: Subject("missing".into()) }]),
             retention_policy: meta_signal_belief_nexus::RetentionPolicy::KeepAll,
         };
-        let query = Query::Publish(publication);
+        let query = Input::Publish(publication);
         let archived = query.signalize().expect("archive emission");
-        assert_eq!(Signal::<Query>::from(archived.bytes().to_vec()).restore().unwrap(), query);
+        assert_eq!(Signal::<Input>::from(archived.bytes().to_vec()).restore().unwrap(), query);
     }
 
     #[test]
     fn inspection_returns_pointer_and_manifest_as_separate_recovery_evidence() {
-        let response = Response::Inspected(PublicationInspection {
+        let response = Output::Inspected(PublicationInspection {
             workspace: Workspace(WorkspacePath("/tmp/work".into())),
             publication_identity_option: Some(PublicationIdentity { generation_id: GenerationId("sha256:generation".into()), publication_revision: PublicationRevision(4) }),
             publication_manifest_option: Some(PublicationManifest {
@@ -1246,7 +1295,7 @@ mod tests {
             }),
         });
         let archived = response.signalize().expect("archive inspection");
-        assert_eq!(Signal::<Response>::from(archived.bytes().to_vec()).restore().unwrap(), response);
+        assert_eq!(Signal::<Output>::from(archived.bytes().to_vec()).restore().unwrap(), response);
     }
 
     #[test]
@@ -1259,10 +1308,10 @@ mod tests {
             }
         }
 
-        fn assert_operation(response: Response, expected: PublicationOperation) {
+        fn assert_operation(response: Output, expected: PublicationOperation) {
             assert!(matches!(
                 response,
-                Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
+                Output::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                     publication_operation,
                     ..
                 })) if publication_operation == expected
@@ -1282,9 +1331,9 @@ mod tests {
                 }
                 let publication = publication(workspace.path(), "requested", None, 1, "instructions", vec![]);
                 let response = if publish {
-                    emission.execute(Query::Publish(publication))
+                    emission.execute(Input::Publish(publication))
                 } else {
-                    emission.execute(Query::InspectPublication(request(&publication)))
+                    emission.execute(Input::InspectPublication(request(&publication)))
                 };
                 assert_operation(response, PublicationOperation::InspectingPointer);
             }
@@ -1299,9 +1348,9 @@ mod tests {
                 symlink("generations/broken", workspace.path().join(".belief/current")).unwrap();
                 let publication = publication(workspace.path(), "requested", None, 1, "instructions", vec![]);
                 let response = if publish {
-                    emission.execute(Query::Publish(publication))
+                    emission.execute(Input::Publish(publication))
                 } else {
-                    emission.execute(Query::InspectPublication(request(&publication)))
+                    emission.execute(Input::InspectPublication(request(&publication)))
                 };
                 assert_operation(response, PublicationOperation::InspectingManifest);
             }
@@ -1309,10 +1358,10 @@ mod tests {
 
         let workspace = tempfile::tempdir().unwrap();
         let publication = publication(workspace.path(), "valid", None, 1, "instructions", vec![]);
-        assert!(matches!(emission.execute(Query::Publish(publication.clone())), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(publication.clone())), Output::Published(_)));
         assert!(matches!(
-            emission.execute(Query::InspectPublication(request(&publication))),
-            Response::Inspected(PublicationInspection {
+            emission.execute(Input::InspectPublication(request(&publication))),
+            Output::Inspected(PublicationInspection {
                 publication_identity_option: Some(_),
                 publication_manifest_option: Some(_),
                 ..
@@ -1335,9 +1384,9 @@ mod tests {
             }
             let before = filesystem_tree(workspace.path());
 
-            assert!(matches!(emission.execute(Query::Publish(publication(
+            assert!(matches!(emission.execute(Input::Publish(publication(
                 workspace.path(), "requested", None, 1, "instructions", vec![]
-            ))), Response::EmissionRefused(EmissionRefusal::PublicationFailed(_))));
+            ))), Output::EmissionRefused(EmissionRefusal::PublicationFailed(_))));
             assert_eq!(filesystem_tree(workspace.path()), before);
         }
 
@@ -1351,9 +1400,9 @@ mod tests {
             symlink("generations/broken", workspace.path().join(".belief/current")).unwrap();
             let before = filesystem_tree(workspace.path());
 
-            assert!(matches!(emission.execute(Query::Publish(publication(
+            assert!(matches!(emission.execute(Input::Publish(publication(
                 workspace.path(), "requested", None, 1, "instructions", vec![]
-            ))), Response::EmissionRefused(EmissionRefusal::PublicationFailed(_))));
+            ))), Output::EmissionRefused(EmissionRefusal::PublicationFailed(_))));
             assert_eq!(filesystem_tree(workspace.path()), before);
         }
 
@@ -1361,18 +1410,18 @@ mod tests {
         let prior = publication(workspace.path(), "prior", None, 1, "prior", vec![]);
         install_legacy(&prior, true);
         let before = filesystem_tree(workspace.path());
-        assert!(matches!(emission.execute(Query::Publish(publication(
+        assert!(matches!(emission.execute(Input::Publish(publication(
             workspace.path(), "requested", None, 2, "instructions", vec![]
-        ))), Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
+        ))), Output::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
             publication_evidence: PublicationEvidence::PriorRevisionMismatch(_),
             ..
         }))));
         assert_eq!(filesystem_tree(workspace.path()), before);
 
         let workspace = tempfile::tempdir().unwrap();
-        assert!(matches!(emission.execute(Query::Publish(publication(
+        assert!(matches!(emission.execute(Input::Publish(publication(
             workspace.path(), "valid", None, 1, "instructions", vec![]
-        ))), Response::Published(_)));
+        ))), Output::Published(_)));
         assert!(workspace.path().join(".belief/generations").is_dir());
         assert!(workspace.path().join(".codex").is_dir());
         assert!(workspace.path().join(".agents").is_dir());
@@ -1394,8 +1443,8 @@ mod tests {
             let requested = publication(workspace.path(), "requested", None, 1, "instructions", vec![]);
 
             assert!(matches!(
-                emission.execute(Query::Publish(requested.clone())),
-                Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
+                emission.execute(Input::Publish(requested.clone())),
+                Output::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                     workspace: refused_workspace,
                     publication_operation: PublicationOperation::InspectingManifest,
                     publication_evidence: PublicationEvidence::ManifestMismatch,
@@ -1409,15 +1458,15 @@ mod tests {
         let candidate = workspace.path().join(".belief/generations")
             .join(publication_component_for("requested", 1));
         write_publication_directory(&requested, &candidate);
-        assert!(matches!(emission.execute(Query::Publish(requested)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(requested)), Output::Published(_)));
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(),
             PathBuf::from("generations").join(publication_component_for("requested", 1)));
 
         let workspace = tempfile::tempdir().unwrap();
         let invalid = publication(workspace.path(), "../invalid", None, 1, "instructions", vec![]);
         assert!(matches!(
-            emission.execute(Query::Publish(invalid)),
-            Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
+            emission.execute(Input::Publish(invalid)),
+            Output::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                 publication_operation: PublicationOperation::StagingGeneration,
                 ..
             }))
@@ -1439,8 +1488,8 @@ mod tests {
         fs::write(repository.path().join("vision/nexus.md"), "working tree\n").unwrap();
 
         let emission = FileEmission::new(PathBuf::from("git")).unwrap();
-        let response = emission.execute(Query::Snapshot(Repository(RepositoryPath(repository.path().to_string_lossy().into_owned()))));
-        let Response::Snapshotted(snapshot) = response else { panic!("snapshot refused: {response:?}") };
+        let response = emission.execute(Input::Snapshot(Repository(RepositoryPath(repository.path().to_string_lossy().into_owned()))));
+        let Output::Snapshotted(snapshot) = response else { panic!("snapshot refused: {response:?}") };
         assert!(is_git_object_id(&snapshot.source_revision.0));
         assert_eq!(snapshot.module_source_vector.len(), 1);
         assert_eq!(snapshot.module_source_vector[0].content.0, "committed\n");
@@ -1463,8 +1512,8 @@ mod tests {
         for root in [committed.path(), unborn.path()] {
             let repository = Repository(RepositoryPath(root.to_string_lossy().into_owned()));
             assert!(matches!(
-                emission.execute(Query::Snapshot(repository.clone())),
-                Response::EmissionRefused(EmissionRefusal::Source(SourceRefusal {
+                emission.execute(Input::Snapshot(repository.clone())),
+                Output::EmissionRefused(EmissionRefusal::Source(SourceRefusal {
                     repository: refused,
                     source_operation: SourceOperation::ReadingMain,
                     source_evidence: SourceEvidence::MainUnavailable,
@@ -1476,8 +1525,8 @@ mod tests {
         let missing_git = committed.path().join("missing-git-executable");
         let emission = FileEmission::new(missing_git.clone()).unwrap();
         assert!(matches!(
-            emission.execute(Query::Snapshot(repository.clone())),
-            Response::EmissionRefused(EmissionRefusal::Source(SourceRefusal {
+            emission.execute(Input::Snapshot(repository.clone())),
+            Output::EmissionRefused(EmissionRefusal::Source(SourceRefusal {
                 repository: refused,
                 source_operation: SourceOperation::ReadingMain,
                 source_evidence: SourceEvidence::Translator(signal_belief_nexus::Diagnostic {
@@ -1504,7 +1553,7 @@ mod tests {
             "first instructions",
             vec![SkillFile { relative_path: RelativePath("nexus/SKILL.md".into()), content: Content("first skill".into()) }],
         );
-        assert!(matches!(emission.execute(Query::Publish(first)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(first)), Output::Published(_)));
         let first_component = publication_component_for("generation-one", 1);
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations").join(&first_component));
         assert_eq!(fs::read_link(workspace.path().join(".agents/skills")).unwrap(), PathBuf::from("../.belief/current/skills"));
@@ -1518,22 +1567,22 @@ mod tests {
             workspace.path(), "generation-invalid", Some(1), 2, "invalid",
             vec![SkillFile { relative_path: RelativePath("../escape".into()), content: Content("escape".into()) }],
         );
-        assert!(matches!(emission.execute(Query::Publish(invalid)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(invalid)), Output::EmissionRefused(_)));
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations").join(&first_component));
         assert!(!workspace.path().join(".belief/generations").join(publication_component_for("generation-invalid", 2)).exists());
 
         let second = publication(workspace.path(), "generation-two", Some(1), 2, "second instructions", vec![]);
-        assert!(matches!(emission.execute(Query::Publish(second)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(second)), Output::Published(_)));
         let second_component = publication_component_for("generation-two", 2);
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations").join(&second_component));
         assert_eq!(fs::read_to_string(workspace.path().join(".belief/generations").join(first_component).join("model-instructions.md")).unwrap(), "first instructions");
 
-        let inspected = emission.execute(Query::InspectPublication(InspectionRequest {
+        let inspected = emission.execute(Input::InspectPublication(InspectionRequest {
             workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
             publication_identity: PublicationIdentity { generation_id: GenerationId("generation-two".into()), publication_revision: PublicationRevision(2) },
             layout: layout(),
         }));
-        let Response::Inspected(observed) = inspected else { panic!("inspection refused: {inspected:?}") };
+        let Output::Inspected(observed) = inspected else { panic!("inspection refused: {inspected:?}") };
         assert_eq!(observed.publication_identity_option.as_ref().unwrap().generation_id, GenerationId("generation-two".into()));
         let manifest = observed.publication_manifest_option.unwrap();
         assert_eq!(manifest.generation_id, GenerationId("generation-two".into()));
@@ -1553,7 +1602,7 @@ mod tests {
         );
         first.workspace_image.harness = signal_belief_nexus::Harness::Claude;
         first.workspace_image.layout = claude_layout();
-        assert!(matches!(emission.execute(Query::Publish(first)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(first)), Output::Published(_)));
         assert_eq!(fs::read_link(workspace.path().join("CLAUDE.md")).unwrap(), workspace.path().join(".belief/current/CLAUDE.md"));
         assert_eq!(fs::read_link(workspace.path().join(".claude/skills")).unwrap(), workspace.path().join(".belief/current/skills"));
         assert_eq!(fs::read_to_string(workspace.path().join("CLAUDE.md")).unwrap(), "claude instructions");
@@ -1565,7 +1614,7 @@ mod tests {
         let mut refused = publication(foreign.path(), "claude-one", None, 1, "ours", vec![]);
         refused.workspace_image.harness = signal_belief_nexus::Harness::Claude;
         refused.workspace_image.layout = claude_layout();
-        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(refused)), Output::EmissionRefused(_)));
         assert_eq!(fs::read_to_string(foreign.path().join("CLAUDE.md")).unwrap(), "foreign");
         assert!(!foreign.path().join(".belief/current").exists());
 
@@ -1575,7 +1624,7 @@ mod tests {
         let mut refused = publication(foreign_skills.path(), "claude-one", None, 1, "ours", vec![]);
         refused.workspace_image.harness = signal_belief_nexus::Harness::Claude;
         refused.workspace_image.layout = claude_layout();
-        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(refused)), Output::EmissionRefused(_)));
         assert_eq!(fs::read_to_string(foreign_skills.path().join(".claude/skills/keep")).unwrap(), "foreign");
     }
 
@@ -1586,16 +1635,16 @@ mod tests {
         let regular = tempfile::tempdir().unwrap();
         fs::create_dir_all(regular.path().join(".belief")).unwrap();
         fs::write(regular.path().join(".belief/current"), "foreign").unwrap();
-        let response = emission.execute(Query::Publish(publication(regular.path(), "one", None, 1, "instructions", vec![])));
-        assert!(matches!(response, Response::EmissionRefused(_)));
+        let response = emission.execute(Input::Publish(publication(regular.path(), "one", None, 1, "instructions", vec![])));
+        assert!(matches!(response, Output::EmissionRefused(_)));
         assert_eq!(fs::read_to_string(regular.path().join(".belief/current")).unwrap(), "foreign");
 
         let linked = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::create_dir_all(linked.path().join(".belief")).unwrap();
         symlink(outside.path(), linked.path().join(".belief/current")).unwrap();
-        let response = emission.execute(Query::Publish(publication(linked.path(), "one", None, 1, "instructions", vec![])));
-        assert!(matches!(response, Response::EmissionRefused(_)));
+        let response = emission.execute(Input::Publish(publication(linked.path(), "one", None, 1, "instructions", vec![])));
+        assert!(matches!(response, Output::EmissionRefused(_)));
         assert_eq!(fs::read_link(linked.path().join(".belief/current")).unwrap(), outside.path());
 
         for existing in [
@@ -1606,8 +1655,8 @@ mod tests {
             let workspace = tempfile::tempdir().unwrap();
             fs::create_dir_all(workspace.path().join(".codex")).unwrap();
             fs::write(workspace.path().join(".codex/config.toml"), existing).unwrap();
-            let response = emission.execute(Query::Publish(publication(workspace.path(), "one", None, 1, "instructions", vec![])));
-            assert!(matches!(response, Response::EmissionRefused(_)));
+            let response = emission.execute(Input::Publish(publication(workspace.path(), "one", None, 1, "instructions", vec![])));
+            assert!(matches!(response, Output::EmissionRefused(_)));
             assert_eq!(fs::read_to_string(workspace.path().join(".codex/config.toml")).unwrap(), existing);
             assert!(!workspace.path().join(".belief/current").exists());
         }
@@ -1620,7 +1669,7 @@ mod tests {
         let unrelated = "model = \"gpt-test\" # keep comment\n[nested]\narray = [1, 2, 3]\ninline = { answer = 42 }\n";
         fs::write(workspace.path().join(".codex/config.toml"), unrelated).unwrap();
         let emission = FileEmission::new(PathBuf::from("git")).unwrap();
-        assert!(matches!(emission.execute(Query::Publish(publication(workspace.path(), "one", None, 1, "instructions", vec![]))), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(publication(workspace.path(), "one", None, 1, "instructions", vec![]))), Output::Published(_)));
         let rendered = fs::read_to_string(workspace.path().join(".codex/config.toml")).unwrap();
         assert!(rendered.contains("model = \"gpt-test\" # keep comment\n"));
         assert!(rendered.contains("[nested]\narray = [1, 2, 3]\ninline = { answer = 42 }\n"));
@@ -1636,16 +1685,16 @@ mod tests {
         let occupied = tempfile::tempdir().unwrap();
         fs::create_dir_all(occupied.path().join(".agents/skills")).unwrap();
         fs::write(occupied.path().join(".agents/skills/unrelated"), "keep").unwrap();
-        let response = emission.execute(Query::Publish(publication(occupied.path(), "generation", None, 1, "instructions", vec![])));
-        assert!(matches!(response, Response::EmissionRefused(_)));
+        let response = emission.execute(Input::Publish(publication(occupied.path(), "generation", None, 1, "instructions", vec![])));
+        assert!(matches!(response, Output::EmissionRefused(_)));
         assert_eq!(fs::read_to_string(occupied.path().join(".agents/skills/unrelated")).unwrap(), "keep");
         assert!(!occupied.path().join(".belief/current").exists());
 
         let linked = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), linked.path().join(".belief")).unwrap();
-        let response = emission.execute(Query::Publish(publication(linked.path(), "generation", None, 1, "instructions", vec![])));
-        assert!(matches!(response, Response::EmissionRefused(_)));
+        let response = emission.execute(Input::Publish(publication(linked.path(), "generation", None, 1, "instructions", vec![])));
+        assert!(matches!(response, Output::EmissionRefused(_)));
         assert!(!outside.path().join("current").exists());
     }
 
@@ -1654,25 +1703,25 @@ mod tests {
         let emission = FileEmission::new(PathBuf::from("git")).unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let first = publication(workspace.path(), "first", None, 1, "first", vec![]);
-        assert!(matches!(emission.execute(Query::Publish(first)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(first)), Output::Published(_)));
         let second = publication(workspace.path(), "second", Some(1), 2, "second", vec![]);
-        assert!(matches!(emission.execute(Query::Publish(second)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(second)), Output::Published(_)));
 
         let request = CleanupRequest {
             workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
             publication_identity: PublicationIdentity { generation_id: GenerationId("first".into()), publication_revision: PublicationRevision(1) }, layout: layout(),
         };
-        assert!(matches!(emission.execute(Query::Clean(request.clone())), Response::Cleaned(CleanupState {
+        assert!(matches!(emission.execute(Input::Clean(request.clone())), Output::Cleaned(CleanupState {
             cleanup_outcome: CleanupOutcome::Removed, ..
         })));
-        assert!(matches!(emission.execute(Query::Clean(request)), Response::Cleaned(CleanupState {
+        assert!(matches!(emission.execute(Input::Clean(request)), Output::Cleaned(CleanupState {
             cleanup_outcome: CleanupOutcome::AlreadyAbsent, ..
         })));
         let current = CleanupRequest {
             workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
             publication_identity: PublicationIdentity { generation_id: GenerationId("second".into()), publication_revision: PublicationRevision(2) }, layout: layout(),
         };
-        assert!(matches!(emission.execute(Query::Clean(current)), Response::CleanupRefused(signal_belief_nexus::FileFailure {
+        assert!(matches!(emission.execute(Input::Clean(current)), Output::CleanupRefused(signal_belief_nexus::FileFailure {
             file_operation: signal_belief_nexus::FileOperation::Cleaning, ..
         })));
         assert!(workspace.path().join(".belief/generations").join(publication_component_for("second", 2)).is_dir());
@@ -1685,20 +1734,20 @@ mod tests {
         let first = publication(workspace.path(), "g", None, 1, "same", vec![]);
         let legacy = install_legacy(&first, true);
         let second = publication(workspace.path(), "g", Some(1), 2, "same", vec![]);
-        let response = emission.execute(Query::Publish(second));
-        assert!(matches!(response, Response::Published(PublicationState {
+        let response = emission.execute(Input::Publish(second));
+        assert!(matches!(response, Output::Published(PublicationState {
             publication_identity: PublicationIdentity { generation_id: GenerationId(ref value), publication_revision: PublicationRevision(2) }, ..
         }) if value == "g"));
         let current = fs::read_link(workspace.path().join(".belief/current")).unwrap();
         assert_eq!(current, PathBuf::from("generations").join(publication_component_for("g", 2)));
         assert!(legacy.is_dir());
 
-        let cleaned = emission.execute(Query::Clean(CleanupRequest {
+        let cleaned = emission.execute(Input::Clean(CleanupRequest {
             workspace: Workspace(WorkspacePath(workspace.path().to_string_lossy().into_owned())),
             publication_identity: PublicationIdentity { generation_id: GenerationId("g".into()), publication_revision: PublicationRevision(1) },
             layout: layout(),
         }));
-        assert!(matches!(cleaned, Response::Cleaned(CleanupState { cleanup_outcome: CleanupOutcome::Removed, .. })));
+        assert!(matches!(cleaned, Output::Cleaned(CleanupState { cleanup_outcome: CleanupOutcome::Removed, .. })));
         assert!(!legacy.exists());
         assert!(workspace.path().join(".belief/generations").join(publication_component_for("g", 2)).is_dir());
     }
@@ -1712,7 +1761,7 @@ mod tests {
         let pending = publication(workspace.path(), "same", Some(1), 2, "same", vec![]);
         let legacy = install_legacy(&pending, false);
         let before = fs::metadata(&legacy).unwrap().modified().unwrap();
-        assert!(matches!(emission.execute(Query::Publish(pending)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(pending)), Output::Published(_)));
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations/same"));
         assert_eq!(fs::metadata(&legacy).unwrap().modified().unwrap(), before);
         assert!(!workspace.path().join(".belief/generations").join(publication_component_for("same", 2)).exists());
@@ -1729,7 +1778,7 @@ mod tests {
         let canonical = workspace.path().join(".belief/generations").join(publication_component_for("g", 2));
         write_publication_directory(&requested, &canonical);
         let before = fs::read_link(workspace.path().join(".belief/current")).unwrap();
-        assert!(matches!(emission.execute(Query::Publish(requested)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(requested)), Output::EmissionRefused(_)));
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), before);
     }
 
@@ -1744,7 +1793,7 @@ mod tests {
         install_legacy(&occupied, false);
         let before = fs::read_link(workspace.path().join(".belief/current")).unwrap();
         let requested = publication(workspace.path(), "g", Some(1), 2, "same", vec![]);
-        assert!(matches!(emission.execute(Query::Publish(requested)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(requested)), Output::EmissionRefused(_)));
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), before);
     }
 
@@ -1756,7 +1805,7 @@ mod tests {
         let canonical = workspace.path().join(".belief/generations").join(publication_component_for("g", 1));
         fs::create_dir_all(&canonical).unwrap();
         fs::write(canonical.join("manifest.signal"), b"invalid").unwrap();
-        assert!(matches!(emission.execute(Query::Publish(requested)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(requested)), Output::EmissionRefused(_)));
         assert!(!workspace.path().join(".belief/current").exists());
         assert!(!workspace.path().join(".agents/skills").exists());
         assert!(!workspace.path().join(".codex/config.toml").exists());
@@ -1772,7 +1821,7 @@ mod tests {
 
         let fresh = tempfile::tempdir().unwrap();
         let refused = publication(fresh.path(), "duplicate", None, 1, "instructions", duplicate_skills.clone());
-        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
+        assert!(matches!(emission.execute(Input::Publish(refused)), Output::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
             publication_operation: PublicationOperation::StagingGeneration,
             publication_evidence: PublicationEvidence::PermissionDenied,
             ..
@@ -1785,7 +1834,7 @@ mod tests {
         fs::write(existing.path().join(".codex/config.toml"), settings).unwrap();
         fs::write(existing.path().join("keep"), b"foreign").unwrap();
         let refused = publication(existing.path(), "duplicate", None, 1, "instructions", duplicate_skills);
-        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(refused)), Output::EmissionRefused(_)));
         assert_eq!(fs::read(existing.path().join(".codex/config.toml")).unwrap(), settings);
         assert_eq!(fs::read(existing.path().join("keep")).unwrap(), b"foreign");
         assert!(!existing.path().join(".belief").exists());
@@ -1796,7 +1845,7 @@ mod tests {
             SkillFile { relative_path: RelativePath("first/SKILL.md".into()), content: Content("first".into()) },
             SkillFile { relative_path: RelativePath("second/SKILL.md".into()), content: Content("second".into()) },
         ]);
-        assert!(matches!(emission.execute(Query::Publish(valid)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(valid)), Output::Published(_)));
         assert_eq!(fs::read_to_string(distinct.path().join(".agents/skills/first/SKILL.md")).unwrap(), "first");
         assert_eq!(fs::read_to_string(distinct.path().join(".agents/skills/second/SKILL.md")).unwrap(), "second");
     }
@@ -1812,7 +1861,7 @@ mod tests {
             let refused = publication(workspace.path(), generation, None, 1, "instructions", paths.into_iter().map(|path|
                 SkillFile { relative_path: RelativePath(path.into()), content: Content(path.into()) }
             ).collect());
-            assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
+            assert!(matches!(emission.execute(Input::Publish(refused)), Output::EmissionRefused(EmissionRefusal::PublicationFailed(PublicationRefusal {
                 publication_operation: PublicationOperation::StagingGeneration,
                 publication_evidence: PublicationEvidence::PermissionDenied,
                 ..
@@ -1829,7 +1878,7 @@ mod tests {
             SkillFile { relative_path: RelativePath("witness".into()), content: Content("file".into()) },
             SkillFile { relative_path: RelativePath("witness/SKILL.md".into()), content: Content("nested".into()) },
         ]);
-        assert!(matches!(emission.execute(Query::Publish(refused)), Response::EmissionRefused(_)));
+        assert!(matches!(emission.execute(Input::Publish(refused)), Output::EmissionRefused(_)));
         assert_eq!(fs::read(existing.path().join(".codex/config.toml")).unwrap(), settings);
         assert_eq!(fs::read(existing.path().join("keep")).unwrap(), b"foreign");
         assert!(!existing.path().join(".belief").exists());
@@ -1862,7 +1911,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let publication = publication(workspace.path(), "publication-2-67", None, 1, "legacy", vec![]);
         let legacy = install_legacy(&publication, false);
-        assert!(matches!(emission.execute(Query::Publish(publication)), Response::Published(_)));
+        assert!(matches!(emission.execute(Input::Publish(publication)), Output::Published(_)));
         assert_eq!(fs::read_link(workspace.path().join(".belief/current")).unwrap(), PathBuf::from("generations/publication-2-67"));
         assert!(legacy.is_dir());
     }

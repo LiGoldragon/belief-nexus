@@ -2,7 +2,27 @@
 members = [
   "crates/core",
   "crates/daemon",
-  "crates/translator",
   "crates/emission",
+  "crates/translator",
+  "crates/wire",
 ]
 resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.89"
+
+[workspace.dependencies]
+signal-belief-nexus = { git = "https://github.com/LiGoldragon/signal-belief-nexus", rev = "c8542d3ac380130190f3d2592b9c1c2f342e3ffa", default-features = false }
+meta-signal-belief-nexus = { git = "https://github.com/LiGoldragon/meta-signal-belief-nexus", rev = "646a5129d51986d37f7a59dd293ebf912c90944d", default-features = false }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "4f5cbb9", default-features = false }
+nexus-exchange = { git = "https://github.com/LiGoldragon/nexus", rev = "63a2d477ca194913c847d15f227637d84fbe9aeb", default-features = false }
+nexus-querying = { git = "https://github.com/LiGoldragon/nexus", rev = "63a2d477ca194913c847d15f227637d84fbe9aeb", default-features = false }
+nexus-serving = { git = "https://github.com/LiGoldragon/nexus", rev = "63a2d477ca194913c847d15f227637d84fbe9aeb", default-features = false }
+kameo = "0.22"
+tokio = { version = "1.53", default-features = false }
+futures-util = { version = "0.3", default-features = false }
+shared-translator = { package = "translator", git = "https://github.com/LiGoldragon/translator", rev = "29601a3", default-features = false, features = ["unix"] }
+translator = { git = "https://github.com/LiGoldragon/translator", rev = "29601a3", default-features = false, features = ["unix"] }
+translator-client = { git = "https://github.com/LiGoldragon/translator", rev = "8e744a4503f13dd748e7e222f5f7aa5443b28961", default-features = false }
+translator-serving = { git = "https://github.com/LiGoldragon/translator", rev = "8e744a4503f13dd748e7e222f5f7aa5443b28961", default-features = false }

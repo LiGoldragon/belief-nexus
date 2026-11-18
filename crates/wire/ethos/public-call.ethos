@@ -1,0 +1,7 @@
+Signal
+[ shared_translator:[ Caller ]                         ; imports
+  signal_belief_nexus:Query.Input ]
+[ Call.{ Caller Query } ]                              ; inputs: an ordinary query with the Caller it came from
+[ Answered.signal_belief_nexus:Output                  ; outputs
+  Failed.String ]
+[]                                                     ; types

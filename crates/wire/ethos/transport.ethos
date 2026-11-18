@@ -1,0 +1,8 @@
+Library
+[ shared_translator:[ Place PeerIdentity ]             ; imports
+  nexus_exchange:[ Admission ]
+  signal_belief_nexus:[ Owner ] ]
+[ MemoryFileName.String                                ; types
+  NexusBootstrap.{ Place Admission PeerIdentity Owner MemoryFileName } ]
+[]                                                     ; traits
+[]                                                     ; associations
