@@ -388,7 +388,7 @@ fn every_exchange_is_answered_on_its_own_identifier_and_the_translator_restores_
     let restored = meta_exchange(&paths.meta, meta_call::Input::RestoreTranslatorConfiguration);
     let meta_call::Output::Restored(snapshot) = restored else { panic!("no translator settings restored: {restored:?}") };
     assert_eq!(snapshot.readiness, meta::Readiness::Ready);
-    assert_eq!(snapshot.set_vector.len(), 9, "the nine translator-kept settings: {snapshot:?}");
+    assert_eq!(snapshot.set_vector.len(), 8, "the eight translator-kept settings: {snapshot:?}");
 
     // Two exchanges open on one connection are each answered on their own identifier.
     let stream = UnixStream::connect(&paths.public).unwrap();

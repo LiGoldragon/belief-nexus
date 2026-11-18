@@ -224,7 +224,7 @@ fn the_pair_answers_as_before_streams_its_frames_and_ends_a_refused_subscribe() 
                     process_id: shared_translator::ProcessId(i64::from(std::process::id())),
                 },
             }])),
-            25,
+            24,
         )
     );
 
@@ -263,7 +263,7 @@ fn the_pair_answers_as_before_streams_its_frames_and_ends_a_refused_subscribe() 
 
     assert_eq!(
         tree.meta("Configure.{ None SubscriberCapacity.1 }"),
-        configured(meta::Set::SubscriberCapacity(1), 26)
+        configured(meta::Set::SubscriberCapacity(1), 25)
     );
     assert_eq!(
         tree.public("Subscribe"),
@@ -284,7 +284,7 @@ fn the_pair_answers_as_before_streams_its_frames_and_ends_a_refused_subscribe() 
     let restarted = tree.launch();
     assert_eq!(
         tree.meta("Configure.{ None RepositoryPolling.212 }"),
-        configured(meta::Set::RepositoryPolling(meta::Timeout(212)), 27),
+        configured(meta::Set::RepositoryPolling(meta::Timeout(212)), 26),
         "a restarted pair applies none of a deployment the Nexus already holds"
     );
     let resolved = tree.public("Resolve.[ { Spirit core } ]");
